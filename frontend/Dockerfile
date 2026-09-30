@@ -1,7 +1,8 @@
-FROM node:22.22.3-alpine AS build
+FROM node:22-bookworm-slim AS build
+
 WORKDIR /app
 COPY package*.json ./
-RUN npm install
+RUN npm install --no-audit --no-fund
 COPY . .
 RUN npm run build
 

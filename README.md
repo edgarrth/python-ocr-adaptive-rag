@@ -44,7 +44,9 @@ Las versiones están fijadas para que el proyecto no dependa de rangos abiertos.
 | LightRAG | 1.5.7 |
 | Angular | 21.2.24 |
 | TypeScript | 5.9.3 |
-| Node para frontend | 20.19+ o 22.x compatible; Dockerfile usa 22.22.3 |
+| Node para frontend | 22.x |
+| Docker backend | `python:3.12-slim-bookworm` |
+| Docker frontend build | `node:22-bookworm-slim` |
 
 El backend, procesamiento, retrieval, evaluación y scripts están escritos en Python. La única excepción es `frontend/`, porque Angular se implementa con TypeScript/HTML/CSS.
 
@@ -99,7 +101,7 @@ flowchart LR
     EV --> LRF
 ```
 
-Solo se levantan Qdrant y Memgraph como infraestructura persistente. No agregué PostgreSQL, Kafka, MongoDB, KurrentDB, InfluxDB ni Drools porque no aportan a la prueba técnica y meterlos solo haría más pesada la PoC.
+Qdrant y Memgraph son los únicos componentes persistentes. Docker Compose además levanta backend, frontend y un contenedor de bootstrap que carga el dataset de ejemplo y termina cuando la ingesta concluye. No agregué PostgreSQL, Kafka, MongoDB, KurrentDB, InfluxDB ni Drools porque no aportan a la prueba técnica y meterlos solo haría más pesada la PoC.
 
 ## Cómo funciona la ingesta
 
@@ -202,7 +204,7 @@ También queda preparado para un endpoint self-hosted:
 
 ```env
 GLM_OCR_MODE=selfhosted
-GLM_OCR_API_URL=http://localhost:5002/glmocr/parse
+GLM_OCR_API_URL=http://localhost:5002/v1/chat/completions
 ZHIPU_API_KEY=
 ```
 
@@ -213,7 +215,7 @@ Los documentos digitales que Docling procesa correctamente no necesitan GLM-OCR.
 ```text
 .
 ├── backend/
-│   ├── Dockerfile
+│   ├── Dockerfile             imagen Python directa, sin Conda
 │   ├── src/pe/axiz/payment_knowledge/
 │   │   ├── api/              endpoints FastAPI
 │   │   ├── application/      orquestación de ingesta, consulta y evaluación
@@ -229,11 +231,14 @@ Los documentos digitales que Docling procesa correctamente no necesitan GLM-OCR.
 ├── scripts/
 │   └── verify.py             compileall + pruebas unitarias reproducibles
 ├── frontend/                 Angular, basado visualmente en la interfaz de referencia
+│   ├── Dockerfile             build con imagen oficial de Node, sin Conda
+│   └── proxy.conf.json       proxy local /api hacia FastAPI
 ├── infrastructure/
-│   ├── docker-compose.yml    Qdrant + Memgraph
+│   ├── docker-compose.yml    stack completo: stores, API, seed y frontend
 │   ├── requests/             payloads de ejemplo
 │   └── responses/            respuestas de referencia de la API
 ├── .env.example
+├── environment.yml          entorno Conda local para backend + frontend
 ├── pyproject.toml
 └── README.md
 ```
@@ -277,119 +282,226 @@ Los JSON usados en los ejemplos están en `infrastructure/requests` y `infrastru
 
 ## Requisitos
 
-Para ejecutar todo localmente:
+Hay dos formas de ejecutar la PoC. La recomendada es Docker porque deja listo el stack completo y también precarga el dataset. Conda queda como alternativa para desarrollo local.
 
-- Python 3.12 o 3.13
-- Docker con Compose v2
-- Node compatible con Angular 21; recomiendo Node 22 LTS
-- npm
-- 6 GB de RAM libres como punto de partida; Docling y modelos locales pueden pedir más
+Para Docker solo necesito:
 
-Para el flujo base no hacen falta credenciales. Las credenciales solo son necesarias para:
+- Docker Engine o Docker Desktop con Compose v2;
+- 6 GB de RAM libres como punto de partida. Docling y los modelos locales pueden pedir más durante la primera ejecución.
 
-- GLM-OCR MaaS cuando se prueba un documento escaneado;
+Para desarrollo local necesito además una distribución Conda, por ejemplo Miniconda o Miniforge. No uso `venv` y no hay pasos manuales de `pip install`. Python y Node salen del entorno Conda.
+
+El flujo base no necesita credenciales. Solo hacen falta cuando quiero usar:
+
+- GLM-OCR MaaS sobre documentos escaneados;
 - LightRAG, porque necesita LLM y embeddings para construir su grafo;
-- síntesis generativa cuando `LLM_PROVIDER=openai`.
+- síntesis generativa con `LLM_PROVIDER=openai`.
 
-## 1. Configurar variables
+## Ejecución recomendada: todo con Docker
 
-Desde la raíz:
+Desde la raíz del proyecto:
+
+```bash
+docker compose -f infrastructure/docker-compose.yml up --build
+```
+
+Ese único comando hace todo el bootstrap:
+
+1. levanta Qdrant;
+2. levanta Memgraph;
+3. construye y levanta el backend;
+4. ejecuta `dataset-seed` como contenedor de una sola corrida;
+5. `dataset-seed` espera a que la ruta de ingesta esté disponible y llama a `POST /api/v1/datasets/seed`;
+6. se crean los chunks, vectores, nodos y relaciones del dataset de payment processing;
+7. cuando el seed termina correctamente, levanta el frontend Angular.
+
+No hay que ejecutar un script de inserts aparte. La precarga forma parte del arranque del stack. El contenedor `dataset-seed` termina con código `0` cuando acaba; eso es esperado.
+
+Dentro de Docker no uso Conda ni Micromamba. El backend parte de `python:3.12-slim-bookworm`, instala el proyecto directamente con `python -m pip install .` durante el build y ejecuta Uvicorn con `python -m uvicorn`. El frontend se construye con `node:22-bookworm-slim` y luego se sirve desde Nginx. Conda queda reservado exclusivamente para desarrollo local desde el IDE.
+
+Servicios expuestos:
+
+| Servicio | URL / puerto | Uso |
+| --- | --- | --- |
+| Frontend | `http://localhost:4200` | interfaz Angular |
+| API | `http://localhost:8000` | FastAPI |
+| Swagger | `http://localhost:8000/docs` | prueba de endpoints |
+| Qdrant HTTP | `localhost:6333` | vectores y colecciones |
+| Qdrant gRPC | `localhost:6334` | interfaz gRPC |
+| Memgraph Bolt | `localhost:7687` | acceso al grafo |
+| Memgraph | `localhost:7444` | puerto expuesto por Memgraph |
+
+Para revisar el estado en otra terminal:
+
+```bash
+docker compose -f infrastructure/docker-compose.yml ps
+```
+
+Para detener el stack se usa `Ctrl+C`. Si luego quiero remover los contenedores sin borrar los datos:
+
+```bash
+docker compose -f infrastructure/docker-compose.yml down
+```
+
+Para resetear completamente la PoC, incluidas las colecciones, el grafo y el runtime de LightRAG:
+
+```bash
+docker compose -f infrastructure/docker-compose.yml down -v
+```
+
+No configuré health checks periódicos en Compose. El bootstrap usa reintentos finitos solo hasta que el dataset logra cargarse, así que no hay llamadas de health ejecutándose permanentemente ni ensuciando los logs.
+
+### Configuración del `.env` y credenciales
+
+La PoC base puede levantar sin credenciales externas. En ese modo funcionan Docling para documentos digitales, Native RAG, Hybrid RAG, RAGLight, GraphRAG, Adaptive Routing, Qdrant, Memgraph, evaluación y el frontend. La generación queda en modo extractivo.
+
+Creo el archivo desde la raíz solo cuando quiero activar las capacidades que dependen de servicios externos:
 
 ```bash
 cp .env.example .env
 ```
 
-La configuración por defecto deja la generación en modo extractivo, RAGLight habilitado y LightRAG declarado pero no disponible hasta configurar el proveedor OpenAI-compatible.
+Para Docker, Compose usa las variables del `.env` ubicado en la raíz. Las direcciones internas de Qdrant y Memgraph ya están definidas en `infrastructure/docker-compose.yml`, por eso no tengo que cambiar sus URLs para ejecutar el stack completo.
 
-## 2. Levantar infraestructura
+| Variable | ¿Obligatoria? | Para qué sirve | De dónde sale |
+| --- | --- | --- | --- |
+| `LLM_PROVIDER` | No | `extractive` no llama a ningún LLM; `openai` activa síntesis generativa | valor de configuración |
+| `OPENAI_API_KEY` | Solo para generación OpenAI y LightRAG con este adapter | autenticación del LLM y embeddings usados por LightRAG | colocar la clave del proveedor configurado |
+| `OPENAI_BASE_URL` | Solo si cambio de endpoint | endpoint OpenAI-compatible | URL del proveedor; el ejemplo deja el endpoint estándar |
+| `OPENAI_MODEL` | Solo con `LLM_PROVIDER=openai` o LightRAG | modelo generativo | nombre soportado por el proveedor |
+| `OPENAI_EMBEDDING_MODEL` | Para LightRAG | embeddings de LightRAG | nombre soportado por el proveedor |
+| `OPENAI_EMBEDDING_DIMENSION` | Para LightRAG | dimensión que debe coincidir con el embedding elegido | documentación del modelo de embeddings |
+| `ZHIPU_API_KEY` | Solo para GLM-OCR en modo MaaS | autenticación contra el servicio GLM-OCR de Zhipu/Z.ai | consola BigModel: `https://www.bigmodel.cn/usercenter/proj-mgmt/apikeys` |
+| `GLM_OCR_MODE` | Solo si quiero cambiar el modo | `maas` usa la nube; `selfhosted` usa un endpoint propio | `maas` o `selfhosted` |
+| `GLM_OCR_API_URL` | No en MaaS | URL del servidor GLM-OCR self-hosted/OpenAI-compatible | URL de mi despliegue propio |
+| `RAGLIGHT_ENABLED` | No | habilita el flujo RAGLight | `true`/`false`; no necesita token |
+| `LIGHTRAG_ENABLED` | No | habilita el flujo LightRAG | `true`/`false`; además necesita LLM + embeddings |
+| `QDRANT_*` | No para Docker | colección y conexión vectorial | la PoC levanta Qdrant local |
+| `MEMGRAPH_*` | No para Docker | conexión al grafo | la PoC levanta Memgraph local sin usuario/password |
+| `EMBEDDING_*` | No | embeddings usados por Native/Hybrid/RAGLight | modelo público configurado; no necesita token |
 
-```bash
-cd infrastructure
-docker compose up
+Docling no requiere API key. RAGLight tampoco requiere API key en esta PoC porque usa embeddings públicos/Hugging Face y Qdrant local. Qdrant y Memgraph tampoco necesitan tokens con la configuración del Compose.
+
+GLM-OCR solo necesita `ZHIPU_API_KEY` cuando el documento cae en la ruta OCR y `GLM_OCR_MODE=maas`. Los `.md` del dataset inicial no usan OCR, por eso el bootstrap puede terminar sin esa clave.
+
+LightRAG es distinto: para construir su grafo necesita un LLM y embeddings. El adapter incluido usa un endpoint OpenAI-compatible, por lo que si dejo `OPENAI_API_KEY` vacío, LightRAG queda reportado como no disponible pero no bloquea Native RAG, Hybrid RAG, RAGLight ni GraphRAG.
+
+### Ejemplo mínimo sin tokens
+
+```env
+LLM_PROVIDER=extractive
+RAGLIGHT_ENABLED=true
+LIGHTRAG_ENABLED=true
+GLM_OCR_MODE=maas
+ZHIPU_API_KEY=
+OPENAI_API_KEY=
 ```
 
-No hay health checks periódicos en Compose para evitar que los logs estén mostrando llamadas de health de forma permanente.
+Con esta configuración el stack levanta y precarga el dataset textual. LightRAG queda inactivo hasta que tenga credenciales, y GLM-OCR solo fallaría si intento cargar un documento que realmente necesite OCR.
 
-Servicios:
+### Ejemplo con todas las rutas cloud habilitadas
 
-| Servicio | Puerto | Uso |
-| --- | ---: | --- |
-| Qdrant HTTP | 6333 | vectores y colecciones |
-| Qdrant gRPC | 6334 | interfaz gRPC disponible |
-| Memgraph Bolt | 7687 | driver Python |
-| Memgraph monitoring | 7444 | puerto expuesto por Memgraph |
+```env
+LLM_PROVIDER=openai
+OPENAI_API_KEY=sk-ejemplo-reemplazar
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_MODEL=gpt-5-mini
+OPENAI_EMBEDDING_MODEL=text-embedding-3-small
+OPENAI_EMBEDDING_DIMENSION=1536
 
-Para borrar toda la data de la PoC:
+GLM_OCR_MODE=maas
+GLM_OCR_API_URL=
+ZHIPU_API_KEY=sk-zhipu-ejemplo-reemplazar
 
-```bash
-cd infrastructure
-docker compose down -v
+RAGLIGHT_ENABLED=true
+LIGHTRAG_ENABLED=true
 ```
 
-## 3. Crear entorno Python e instalar backend
+Los valores con `ejemplo-reemplazar` son solo placeholders. No se deben commitear claves reales; `.env` está ignorado por Git.
+
+### Ejemplo de GLM-OCR self-hosted
+
+Si ya tengo un servidor GLM-OCR propio con API OpenAI-compatible:
+
+```env
+GLM_OCR_MODE=selfhosted
+GLM_OCR_API_URL=http://localhost:5002/v1/chat/completions
+ZHIPU_API_KEY=
+```
+
+En Docker, `localhost` dentro del backend apunta al mismo contenedor. Si el OCR self-hosted corre fuera del stack, debo usar un hostname accesible desde la red Docker o incorporarlo como otro servicio explícito.
+
+## Ejecución local con Conda
+
+Esta ruta sirve cuando quiero depurar el backend o Angular desde el IDE. El entorno de la raíz incluye Python 3.12, Node 22 y todas las dependencias del backend.
+
+### 1. Crear el entorno
 
 Desde la raíz:
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-pip install -e ".[dev]"
+conda env create -f environment.yml
 ```
 
-En PowerShell:
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-pip install -e ".[dev]"
-```
-
-## 4. Ejecutar backend
+Si el entorno ya existe y cambié dependencias:
 
 ```bash
-uvicorn pe.axiz.payment_knowledge.main:app --host 0.0.0.0 --port 8000
+conda env update -n axiz-adaptive-rag-payments -f environment.yml --prune
 ```
 
-Swagger queda en `http://localhost:8000/docs`.
+No necesito crear `.venv` ni ejecutar `pip install`. Las dependencias que están en PyPI y no en conda-forge están declaradas dentro de la sección `pip` del propio `environment.yml`, por lo que la instalación sigue siendo parte de la creación del entorno Conda.
 
-También se puede construir el backend como imagen:
+### 2. Levantar solo los stores
+
+En una terminal:
 
 ```bash
-docker build -f backend/Dockerfile -t axiz-adaptive-rag-api .
+docker compose -f infrastructure/docker-compose.yml up qdrant memgraph
 ```
 
-## 5. Precargar dataset
+### 3. Ejecutar backend con Conda
 
-Con el backend levantado:
+En otra terminal, desde la raíz:
 
 ```bash
-python datasets/seed.py
+conda run -n axiz-adaptive-rag-payments python -m uvicorn pe.axiz.payment_knowledge.main:app --host 0.0.0.0 --port 8000
 ```
 
-El script llama a `POST /api/v1/datasets/seed`. Al terminar deberían existir:
+### 4. Precargar el dataset con Conda
+
+Con el backend arriba:
+
+```bash
+conda run -n axiz-adaptive-rag-payments python datasets/seed.py --wait-seconds 120
+```
+
+El script llama a la misma API que usa el bootstrap de Docker. Al terminar deberían existir:
 
 - colección principal `axiz_payment_chunks` en Qdrant;
-- colección `axiz_payment_raglight` creada por RAGLight;
+- colección `axiz_payment_raglight` cuando RAGLight logra inicializarse;
 - nodos `Document`, `Chunk` y `Entity` en Memgraph;
-- relaciones `CONTAINS`, `MENTIONS` y `CO_OCCURS`.
+- relaciones `CONTAINS`, `MENTIONS` y `CO_OCCURS`;
+- working directory de LightRAG si está configurado.
 
-Si LightRAG está configurado, también se crea su working directory en `.runtime/lightrag`.
+### 5. Ejecutar Angular con Conda
 
-## 6. Ejecutar frontend Angular
+Primero instalo los paquetes npm usando el Node que viene dentro del entorno Conda:
 
 ```bash
-cd frontend
-npm install
-npm start
+conda run -n axiz-adaptive-rag-payments npm --prefix frontend install --no-audit --no-fund
 ```
 
-Abrir `http://localhost:4200`.
+Luego:
+
+```bash
+conda run -n axiz-adaptive-rag-payments npm --prefix frontend start
+```
+
+Abrir `http://localhost:4200`. En desarrollo Angular usa `frontend/proxy.conf.json`; en Docker Nginx hace el mismo proxy. El código del frontend consume `/api/v1` y ya no tiene `http://localhost:8000` hardcodeado.
 
 La interfaz permite:
 
-- precargar el dataset;
+- precargar nuevamente el dataset si quiero repetir la ingesta;
 - subir documentos;
 - elegir `auto`, Native RAG, Hybrid RAG, RAGLight, GraphRAG o LightRAG;
 - cambiar `top_k`;
@@ -397,22 +509,30 @@ La interfaz permite:
 - ejecutar evaluación de los cinco motores;
 - consultar relaciones de Memgraph desde el panel derecho.
 
-La UI conserva la estructura visual del proyecto de referencia, pero evita un icono de robot y usa solo identidad visual de Axiz.
-
-Para build de producción:
+Para generar el build Angular desde Conda:
 
 ```bash
-cd frontend
-npm run build
+conda run -n axiz-adaptive-rag-payments npm --prefix frontend run build
 ```
 
-También existe `frontend/Dockerfile`:
+## Qué se inserta automáticamente al levantar Docker
 
-```bash
-cd frontend
-docker build -t axiz-adaptive-rag-frontend .
-docker run --rm -p 4200:80 axiz-adaptive-rag-frontend
+El servicio `dataset-seed` usa `datasets/seed.py` y espera hasta 900 segundos por el backend. No usa un health check infinito: intenta la carga, espera tres segundos si la infraestructura todavía no está lista y termina apenas recibe una respuesta exitosa.
+
+La carga recorre `datasets/sample_documents` y ejecuta el mismo pipeline que una carga manual:
+
+```text
+documento
+  -> Docling / GLM-OCR si corresponde
+  -> Markdown canónico
+  -> chunking + entidades
+  -> Qdrant
+  -> Memgraph
+  -> RAGLight
+  -> LightRAG cuando está configurado
 ```
+
+Qdrant usa IDs deterministas para los chunks y Memgraph usa `MERGE`, por lo que volver a cargar el corpus no crea copias nuevas de esos elementos base.
 
 ## Pruebas con curl
 
@@ -560,59 +680,37 @@ Para una evaluación más seria se puede ampliar el dataset sin cambiar el códi
 
 ## Pruebas de código
 
-Backend:
+Todas las pruebas locales se ejecutan dentro del entorno Conda.
+
+Backend completo:
 
 ```bash
-pytest -q backend/tests
+conda run -n axiz-adaptive-rag-payments python scripts/verify.py
+```
+
+Pruebas unitarias:
+
+```bash
+conda run -n axiz-adaptive-rag-payments python -m pytest -q backend/tests
 ```
 
 Chequeo de estilo:
 
 ```bash
-ruff check backend/src backend/tests datasets
+conda run -n axiz-adaptive-rag-payments ruff check backend/src backend/tests datasets
 ```
 
 Frontend:
 
 ```bash
-cd frontend
-npm run build
+conda run -n axiz-adaptive-rag-payments npm --prefix frontend run build
 ```
 
-## Estado de validación del ZIP
+## Estado de validación de esta entrega
 
-Antes de empaquetar esta entrega ejecuté en el entorno de construcción:
+La estructura del backend y los tests se validaron antes de volver a empaquetar el proyecto. También validé la sintaxis del `environment.yml` local, de Docker Compose, del proxy Angular/Nginx y que los Dockerfiles ya no dependan de Conda/Micromamba.
 
-```text
-python -m compileall -q backend/src backend/tests datasets/seed.py
-PYTHONPATH=backend/src pytest -q backend/tests
-```
-
-Resultado:
-
-```text
-8 passed
-```
-
-También validé que `src/main.ts` y `src/app/app.ts` son sintácticamente válidos con TypeScript 5.9.3 y que la plantilla HTML base es parseable. El empaquetado Python también fue validado generando e instalando correctamente el wheel editable del proyecto, sin resolver dependencias externas:
-
-```text
-python -m pip install --no-deps --no-build-isolation -e .
-Successfully built axiz-adaptive-rag-payments
-Successfully installed axiz-adaptive-rag-payments-0.1.0
-```
-
-El entorno usado para generar el ZIP no tiene acceso de red desde `pip`/`npm` y tampoco tiene Docker instalado. Por esa limitación no fue posible descargar desde aquí el árbol completo de dependencias para ejecutar `pip install -e ".[dev]"`, `npm install`, `ng build` ni levantar Qdrant/Memgraph. La prueba de resolución que requería red falló por DNS del sandbox; el build del paquete Python sin dependencias sí terminó correctamente. Las versiones fijadas fueron seleccionadas según las versiones publicadas y los requisitos declarados de Python/Node, pero la resolución integral debe cerrarse en una estación con acceso a los repositorios de paquetes. El comando definitivo es:
-
-```bash
-pip install -e ".[dev]"
-pytest -q backend/tests
-cd frontend
-npm install
-npm run build
-```
-
-No marco un `ng build` como ejecutado porque en este entorno no pudo instalarse Angular. Prefiero dejar esa limitación explícita en lugar de registrar una compilación que no ocurrió.
+El entorno de construcción usado aquí no tiene Docker ni Conda instalados, por lo que no registro una ejecución de `docker compose up --build` ni `conda env create` que no pude hacer. La ejecución reproducible queda definida por `environment.yml`, los Dockerfiles y `infrastructure/docker-compose.yml`.
 
 ## Decisiones de alcance
 

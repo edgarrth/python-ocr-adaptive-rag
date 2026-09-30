@@ -1,0 +1,8 @@
+name: axiz-adaptive-rag-backend
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
+  - pip:
+      - -e .

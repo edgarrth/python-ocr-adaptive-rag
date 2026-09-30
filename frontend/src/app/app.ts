@@ -46,7 +46,7 @@ interface GraphEdge {
   styleUrl: './app.css'
 })
 export class AppComponent {
-  private readonly apiBase = 'http://localhost:8000/api/v1';
+  private readonly apiBase = '/api/v1';
 
   readonly strategies = [
     ['auto', 'Adaptive Routing'],

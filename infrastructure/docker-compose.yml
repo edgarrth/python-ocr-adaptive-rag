@@ -1,3 +1,5 @@
+name: axiz-adaptive-rag-payments
+
 services:
   qdrant:
     image: qdrant/qdrant:v1.19.1
@@ -7,6 +9,8 @@ services:
       - "6334:6334"
     volumes:
       - qdrant_data:/qdrant/storage
+    networks:
+      - axiz-rag
     restart: unless-stopped
 
   memgraph:
@@ -17,8 +21,95 @@ services:
       - "7444:7444"
     volumes:
       - memgraph_data:/var/lib/memgraph
+    networks:
+      - axiz-rag
     restart: unless-stopped
+
+  backend:
+    image: axiz-adaptive-rag-backend:local
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+    container_name: axiz-rag-backend
+    environment:
+      APP_ENV: docker
+      API_HOST: 0.0.0.0
+      API_PORT: 8000
+      CORS_ORIGINS: http://localhost:4200
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_COLLECTION: axiz_payment_chunks
+      RAGLIGHT_COLLECTION: axiz_payment_raglight
+      EMBEDDING_PROVIDER: fastembed
+      EMBEDDING_MODEL: sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+      EMBEDDING_DIMENSION: 384
+      MEMGRAPH_URI: bolt://memgraph:7687
+      MEMGRAPH_USER: ""
+      MEMGRAPH_PASSWORD: ""
+      LLM_PROVIDER: ${LLM_PROVIDER:-extractive}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5-mini}
+      OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
+      OPENAI_EMBEDDING_DIMENSION: ${OPENAI_EMBEDDING_DIMENSION:-1536}
+      GLM_OCR_MODE: ${GLM_OCR_MODE:-maas}
+      GLM_OCR_API_URL: ${GLM_OCR_API_URL:-}
+      ZHIPU_API_KEY: ${ZHIPU_API_KEY:-}
+      OCR_MIN_TEXT_CHARS: 120
+      RAGLIGHT_ENABLED: ${RAGLIGHT_ENABLED:-true}
+      LIGHTRAG_ENABLED: ${LIGHTRAG_ENABLED:-true}
+      LIGHTRAG_WORKDIR: /app/.runtime/lightrag
+      DATASETS_DIR: /app/datasets/sample_documents
+    ports:
+      - "8000:8000"
+    volumes:
+      - runtime_data:/app/.runtime
+    depends_on:
+      - qdrant
+      - memgraph
+    networks:
+      - axiz-rag
+    restart: unless-stopped
+
+  dataset-seed:
+    image: axiz-adaptive-rag-backend:local
+    container_name: axiz-rag-dataset-seed
+    command:
+      - python
+      - datasets/seed.py
+      - --api
+      - http://backend:8000
+      - --wait-seconds
+      - "900"
+      - --retry-interval
+      - "3"
+    depends_on:
+      - backend
+    networks:
+      - axiz-rag
+    restart: "no"
+
+  frontend:
+    image: axiz-adaptive-rag-frontend:local
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+    container_name: axiz-rag-frontend
+    ports:
+      - "4200:80"
+    depends_on:
+      backend:
+        condition: service_started
+      dataset-seed:
+        condition: service_completed_successfully
+    networks:
+      - axiz-rag
+    restart: unless-stopped
+
+networks:
+  axiz-rag:
+    name: axiz-adaptive-rag-network
 
 volumes:
   qdrant_data:
   memgraph_data:
+  runtime_data:

@@ -1,0 +1,9 @@
+name: axiz-adaptive-rag-payments
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - nodejs=22
+  - pip
+  - pip:
+      - -e .[dev]
