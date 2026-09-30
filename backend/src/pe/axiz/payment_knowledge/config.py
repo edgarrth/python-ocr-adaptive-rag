@@ -40,6 +40,8 @@ class Settings(BaseSettings):
     ocr_min_text_chars: int = 120
 
     raglight_enabled: bool = True
+    raglight_service_url: str = "http://localhost:8010"
+    raglight_timeout_seconds: float = 600.0
     lightrag_enabled: bool = True
     lightrag_workdir: Path = Path(".runtime/lightrag")
     datasets_dir: Path = Path("datasets/sample_documents")

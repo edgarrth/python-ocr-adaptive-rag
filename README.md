@@ -2,7 +2,7 @@
 
 Esta PoC prueba una arquitectura de conocimiento documental para payment processing. El objetivo no es hacer otro chat con PDFs, sino comparar varias formas de recuperar información sobre el mismo corpus y poder ver por qué una estrategia funciona mejor que otra según el tipo de pregunta.
 
-La aplicación procesa documentos con Docling, usa GLM-OCR como ruta OCR cuando el contenido viene escaneado o la extracción normal no alcanza un mínimo de texto, construye una representación vectorial en Qdrant y un grafo de conocimiento en Memgraph, y expone cinco estrategias de recuperación: Native RAG, Hybrid RAG, RAGLight, GraphRAG y LightRAG. En modo `auto`, un router decide entre recuperación semántica, híbrida o GraphRAG según señales observables de la consulta.
+La aplicación procesa documentos con Docling, usa GLM-OCR como ruta OCR cuando el contenido viene escaneado o la extracción normal no alcanza un mínimo de texto, construye una representación vectorial en Qdrant y un grafo de conocimiento en Memgraph, y expone cinco estrategias de recuperación: Native RAG, Hybrid RAG, RAGLight, GraphRAG y LightRAG. En modo `auto`, un router decide entre recuperación semántica, híbrida o GraphRAG según señales observables de la consulta. RAGLight corre en un servicio Python separado para aislar su árbol de dependencias del backend principal y poder mantener Docling y RAGLight en versiones actuales sin forzar paquetes incompatibles en el mismo entorno.
 
 La interfaz está hecha en Angular tomando como base visual el proyecto de ejemplo: navegación a la izquierda, conversación al centro y configuración/evaluación a la derecha. La adapté para carga documental, selección de estrategia, evidencia recuperada, trazabilidad técnica, evaluación y exploración del grafo.
 
@@ -25,7 +25,7 @@ La comparación no pretende declarar un ganador universal. El endpoint de evalua
 
 ## Tecnologías y versiones
 
-Las versiones están fijadas para que el proyecto no dependa de rangos abiertos. Se eligieron versiones actuales cuyos requisitos publicados son compatibles con Python 3.12/3.13; la resolución integral del árbol de dependencias debe confirmarse al instalar en un entorno con acceso a los repositorios de paquetes.
+Las versiones principales están fijadas para evitar cambios sorpresivos. Docling y RAGLight se ejecutan en procesos Python distintos porque sus dependencias de CLI no son compatibles entre sí en las versiones seleccionadas: Docling 2.130.0 termina requiriendo `typer>=0.19,<0.27`, mientras RAGLight 3.4.7 fija `typer==0.16.0`. En vez de degradar una de las dos tecnologías, la PoC las aísla y las conecta por HTTP.
 
 | Componente | Versión usada |
 | --- | ---: |
@@ -46,6 +46,7 @@ Las versiones están fijadas para que el proyecto no dependa de rangos abiertos.
 | TypeScript | 5.9.3 |
 | Node para frontend | 22.x |
 | Docker backend | `python:3.12-slim-bookworm` |
+| Docker RAGLight | `python:3.12-slim-bookworm` |
 | Docker frontend build | `node:22-bookworm-slim` |
 
 El backend, procesamiento, retrieval, evaluación y scripts están escritos en Python. La única excepción es `frontend/`, porque Angular se implementa con TypeScript/HTML/CSS.
@@ -54,7 +55,7 @@ El backend, procesamiento, retrieval, evaluación y scripts están escritos en P
 
 ```mermaid
 flowchart LR
-    UI[Angular Frontend] --> API[FastAPI pe.axiz]
+    UI[Angular Frontend] --> API[FastAPI pe.axiz.payment_knowledge]
 
     subgraph Ingestion[Ingesta documental]
       D[PDF DOCX MD TXT Imagen] --> DOC[Docling]
@@ -68,27 +69,28 @@ flowchart LR
     API --> Ingestion
     CH --> Q[(Qdrant)]
     CH --> M[(Memgraph)]
-    CAN --> RL[RAGLight index]
+    CAN --> RLHTTP[RAGLight Adapter HTTP]
+    RLHTTP --> RLS[RAGLight Service]
+    RLS --> Q
     CAN --> LR[LightRAG index]
 
     API --> ROUTER[Adaptive Router]
     ROUTER --> NR[Native RAG]
     ROUTER --> HR[Hybrid RAG]
     ROUTER --> GR[GraphRAG]
-    API --> RLF[RAGLight]
+    API --> RLHTTP
     API --> LRF[LightRAG]
 
     NR --> Q
     HR --> Q
     GR --> Q
     GR --> M
-    RLF --> Q
     LRF --> LR
 
     NR --> GEN[Answer Generator]
     HR --> GEN
     GR --> GEN
-    RLF --> GEN
+    RLHTTP --> GEN
     LRF --> GEN
     GEN --> API
     API --> UI
@@ -96,12 +98,14 @@ flowchart LR
     API --> EV[Evaluation]
     EV --> NR
     EV --> HR
-    EV --> RLF
+    EV --> RLHTTP
     EV --> GR
     EV --> LRF
 ```
 
-Qdrant y Memgraph son los únicos componentes persistentes. Docker Compose además levanta backend, frontend y un contenedor de bootstrap que carga el dataset de ejemplo y termina cuando la ingesta concluye. No agregué PostgreSQL, Kafka, MongoDB, KurrentDB, InfluxDB ni Drools porque no aportan a la prueba técnica y meterlos solo haría más pesada la PoC.
+Qdrant y Memgraph son los únicos componentes persistentes de infraestructura. Docker Compose también levanta el backend, el servicio aislado de RAGLight, el frontend y un contenedor de bootstrap que carga el dataset de ejemplo y termina cuando la ingesta concluye. No agregué PostgreSQL, Kafka, MongoDB, KurrentDB, InfluxDB ni Drools porque no aportan a la prueba técnica.
+
+El servicio RAGLight no agrega una nueva base ni duplica infraestructura. Sigue usando Qdrant, pero tiene su propio runtime Python. Esa separación existe por compatibilidad de dependencias y también deja claro el límite entre el framework RAGLight y el backend de la PoC.
 
 ## Cómo funciona la ingesta
 
@@ -114,7 +118,7 @@ Qdrant y Memgraph son los únicos componentes persistentes. Docker Compose adem�
 7. `PaymentEntityExtractor` detecta conceptos de pagos y códigos que sirven para el grafo.
 8. Los chunks se indexan en Qdrant.
 9. Documentos, chunks, entidades y relaciones de co-ocurrencia se materializan en Memgraph.
-10. El mismo documento canónico se envía al índice alterno de RAGLight.
+10. El backend envía la ruta del documento canónico al servicio `raglight-service`; ambos comparten el volumen `.runtime`, por lo que RAGLight indexa exactamente el mismo contenido normalizado.
 11. Si LightRAG está configurado con un proveedor OpenAI-compatible, el contenido también se inserta en su índice.
 
 El identificador de cada chunk es un UUID determinista para que Qdrant acepte el punto y para que reingestar el mismo contenido no cree identificadores distintos. Las relaciones `CO_OCCURS` de Memgraph también incluyen el `chunk_id`, de modo que una segunda carga no infla artificialmente los pesos.
@@ -137,9 +141,11 @@ La intención es que consultas como `código 05` no pierdan el identificador exa
 
 ### RAGLight
 
-`RagLightAdapter` usa una colección Qdrant independiente. La configuración usa el Builder de RAGLight con embeddings Hugging Face y `SEARCH_HYBRID`. El framework combina BM25 + búsqueda semántica + RRF. No necesita un LLM para esta ruta porque la PoC usa RAGLight como motor de retrieval alternativo y mantiene la generación de respuesta en la capa común.
+`RagLightAdapter` ya no importa el paquete RAGLight dentro del backend. Consume por HTTP un servicio Python independiente definido en `raglight_service/`. Ese servicio carga RAGLight 3.4.7, usa una colección Qdrant propia, embeddings Hugging Face y `SEARCH_HYBRID`. El framework combina BM25 + búsqueda semántica + RRF.
 
-Eso permite comparar `Native/Hybrid implementado por nosotros` contra `Hybrid provisto por RAGLight` sin mezclar diferencias del modelo generativo.
+La separación es intencional. Docling 2.130.0 y RAGLight 3.4.7 no pueden convivir hoy en el mismo environment por el pin incompatible de `typer`. Mantenerlos en contenedores y entornos Conda distintos permite conservar las dos versiones sin `--no-deps`, sin forzar un `typer` incorrecto y sin degradar Docling.
+
+RAGLight se usa como motor de retrieval alternativo y la generación sigue en la capa común. Así puedo comparar `Native/Hybrid implementado por nosotros` contra `Hybrid provisto por RAGLight` sin mezclar diferencias del modelo generativo.
 
 ### GraphRAG
 
@@ -222,24 +228,31 @@ Los documentos digitales que Docling procesa correctamente no necesitan GLM-OCR.
 │   │   ├── domain/           contratos y modelos Pydantic
 │   │   ├── generation/       respuesta extractiva u OpenAI-compatible
 │   │   ├── infrastructure/   Docling, GLM-OCR, Qdrant, Memgraph y embeddings
-│   │   └── retrieval/        Native, Hybrid, RAGLight, GraphRAG, LightRAG y router
-│   └── tests/                pruebas unitarias
+│   │   └── retrieval/        Native, Hybrid, GraphRAG, LightRAG, adapter RAGLight y router
+│   └── tests/                pruebas unitarias del backend
+├── raglight_service/
+│   ├── Dockerfile             runtime Python aislado de RAGLight
+│   ├── environment.yml       entorno Conda local exclusivo de RAGLight
+│   ├── pyproject.toml        dependencias del servicio RAGLight
+│   ├── src/pe/axiz/raglight_service/
+│   │   └── main.py           API interna de indexación y búsqueda
+│   └── tests/                pruebas del servicio aislado
 ├── datasets/
 │   ├── sample_documents/     corpus de payment processing
 │   ├── evaluation/           preguntas y fuentes esperadas
 │   └── seed.py               carga del dataset usando la API
 ├── scripts/
-│   └── verify.py             compileall + pruebas unitarias reproducibles
+│   └── verify.py             validaciones reproducibles
 ├── frontend/                 Angular, basado visualmente en la interfaz de referencia
 │   ├── Dockerfile             build con imagen oficial de Node, sin Conda
 │   └── proxy.conf.json       proxy local /api hacia FastAPI
 ├── infrastructure/
-│   ├── docker-compose.yml    stack completo: stores, API, seed y frontend
+│   ├── docker-compose.yml    stack completo: stores, RAGLight, API, seed y frontend
 │   ├── requests/             payloads de ejemplo
 │   └── responses/            respuestas de referencia de la API
 ├── .env.example
-├── environment.yml          entorno Conda local para backend + frontend
-├── pyproject.toml
+├── environment.yml          entorno Conda local del backend + frontend
+├── pyproject.toml           dependencias del backend principal
 └── README.md
 ```
 
@@ -258,11 +271,12 @@ Los puntos que conviene revisar primero son:
 | `infrastructure/qdrant_store.py` | persistencia y consulta vectorial |
 | `infrastructure/memgraph_store.py` | nodos, relaciones, expansión y exploración del grafo |
 | `retrieval/native.py` | Native RAG e Hybrid RAG con RRF |
-| `retrieval/raglight_adapter.py` | RAGLight sobre Qdrant |
+| `retrieval/raglight_adapter.py` | cliente HTTP hacia el servicio RAGLight aislado |
 | `retrieval/graphrag.py` | fusión de evidencia híbrida y grafo |
 | `retrieval/lightrag_adapter.py` | integración con LightRAG |
 | `retrieval/router.py` | decisión del modo `auto` |
 | `generation/llm.py` | generación común para que los motores se comparen con la misma salida |
+| `raglight_service/src/pe/axiz/raglight_service/main.py` | RAGLight, búsqueda híbrida y colección Qdrant dedicada |
 | `frontend/src/app/app.ts` | interacción de la UI con la API |
 | `frontend/src/app/app.html` | layout de conversación, configuración, métricas y grafo |
 
@@ -279,6 +293,14 @@ Los puntos que conviene revisar primero son:
 | - | `GET /docs` | probar API desde navegador | Swagger generado por FastAPI |
 
 Los JSON usados en los ejemplos están en `infrastructure/requests` y `infrastructure/responses`.
+
+El servicio RAGLight expone tres endpoints internos. El frontend no los consume directamente; el backend actúa como fachada.
+
+| Método y endpoint | Uso técnico |
+| --- | --- |
+| `GET http://raglight-service:8010/health` | comprobar que el proceso HTTP está disponible |
+| `POST http://raglight-service:8010/index` | indexar un Markdown canónico compartido por volumen |
+| `POST http://raglight-service:8010/search` | ejecutar retrieval híbrido RAGLight y devolver evidencia al backend |
 
 ## Requisitos
 
@@ -305,26 +327,34 @@ Desde la raíz del proyecto:
 docker compose -f infrastructure/docker-compose.yml up --build
 ```
 
-Ese único comando hace todo el bootstrap:
+Ese único comando hace el bootstrap completo:
 
 1. levanta Qdrant;
 2. levanta Memgraph;
-3. construye y levanta el backend;
-4. ejecuta `dataset-seed` como contenedor de una sola corrida;
-5. `dataset-seed` espera a que la ruta de ingesta esté disponible y llama a `POST /api/v1/datasets/seed`;
-6. se crean los chunks, vectores, nodos y relaciones del dataset de payment processing;
-7. cuando el seed termina correctamente, levanta el frontend Angular.
+3. construye y levanta `raglight-service` con Python 3.12 y RAGLight 3.4.7;
+4. construye y levanta el backend principal con Python 3.12, Docling, GLM-OCR y LightRAG;
+5. ejecuta `dataset-seed` como contenedor de una sola corrida usando la misma definición de build del backend;
+6. `dataset-seed` espera a que la ruta de ingesta esté disponible y llama a `POST /api/v1/datasets/seed`;
+7. se crean chunks, vectores, nodos, relaciones y el índice RAGLight;
+8. cuando el seed termina correctamente, levanta el frontend Angular.
 
-No hay que ejecutar un script de inserts aparte. La precarga forma parte del arranque del stack. El contenedor `dataset-seed` termina con código `0` cuando acaba; eso es esperado.
+No hay que ejecutar inserts ni scripts de carga después. `dataset-seed` termina con código `0` cuando la precarga finaliza; eso es esperado.
 
-Dentro de Docker no uso Conda ni Micromamba. El backend parte de `python:3.12-slim-bookworm`, instala el proyecto directamente con `python -m pip install .` durante el build y ejecuta Uvicorn con `python -m uvicorn`. El frontend se construye con `node:22-bookworm-slim` y luego se sirve desde Nginx. Conda queda reservado exclusivamente para desarrollo local desde el IDE.
+### Por qué backend y RAGLight se construyen por separado
+
+El error `ResolutionImpossible` que aparece al intentar instalar todo junto no se resuelve forzando pip. Docling 2.130.0 depende de un rango de Typer que empieza en 0.19, mientras RAGLight 3.4.7 fija Typer 0.16.0. Por eso el Compose usa dos imágenes Python distintas. El backend no instala `raglight`; `raglight-service` no instala Docling. Los dos comparten Qdrant y el volumen `.runtime`.
+
+`dataset-seed` declara el mismo `image` y el mismo `build` que `backend` mediante un ancla YAML. Así Compose sabe construir la imagen local y no necesita buscar `axiz-adaptive-rag-backend:local` en Docker Hub. No hace falta `docker login`.
+
+Dentro de Docker no uso Conda ni Micromamba. Los servicios Python parten de `python:3.12-slim-bookworm` y se instalan directamente con `python -m pip install .`. El frontend se construye con `node:22-bookworm-slim` y luego se sirve desde Nginx. Conda queda reservado para desarrollo local desde el IDE.
 
 Servicios expuestos:
 
 | Servicio | URL / puerto | Uso |
 | --- | --- | --- |
 | Frontend | `http://localhost:4200` | interfaz Angular |
-| API | `http://localhost:8000` | FastAPI |
+| API | `http://localhost:8000` | FastAPI principal |
+| RAGLight service | `http://localhost:8010` | API interna de retrieval RAGLight; expuesta para diagnóstico local |
 | Swagger | `http://localhost:8000/docs` | prueba de endpoints |
 | Qdrant HTTP | `localhost:6333` | vectores y colecciones |
 | Qdrant gRPC | `localhost:6334` | interfaz gRPC |
@@ -375,6 +405,8 @@ Para Docker, Compose usa las variables del `.env` ubicado en la raíz. Las direc
 | `GLM_OCR_MODE` | Solo si quiero cambiar el modo | `maas` usa la nube; `selfhosted` usa un endpoint propio | `maas` o `selfhosted` |
 | `GLM_OCR_API_URL` | No en MaaS | URL del servidor GLM-OCR self-hosted/OpenAI-compatible | URL de mi despliegue propio |
 | `RAGLIGHT_ENABLED` | No | habilita el flujo RAGLight | `true`/`false`; no necesita token |
+| `RAGLIGHT_SERVICE_URL` | No | URL del servicio aislado RAGLight | local: `http://localhost:8010`; Docker la sobrescribe a `http://raglight-service:8010` |
+| `RAGLIGHT_TIMEOUT_SECONDS` | No | timeout de indexación/búsqueda RAGLight | `600` por defecto |
 | `LIGHTRAG_ENABLED` | No | habilita el flujo LightRAG | `true`/`false`; además necesita LLM + embeddings |
 | `QDRANT_*` | No para Docker | colección y conexión vectorial | la PoC levanta Qdrant local |
 | `MEMGRAPH_*` | No para Docker | conexión al grafo | la PoC levanta Memgraph local sin usuario/password |
@@ -433,9 +465,9 @@ En Docker, `localhost` dentro del backend apunta al mismo contenedor. Si el OCR 
 
 ## Ejecución local con Conda
 
-Esta ruta sirve cuando quiero depurar el backend o Angular desde el IDE. El entorno de la raíz incluye Python 3.12, Node 22 y todas las dependencias del backend.
+Esta ruta sirve cuando quiero depurar desde el IDE. Como Docling y RAGLight tienen un conflicto real de `typer`, uso dos environments Conda separados. No creo `.venv` y no hago instalaciones manuales fuera de los archivos `environment.yml`.
 
-### 1. Crear el entorno
+### 1. Crear el entorno principal
 
 Desde la raíz:
 
@@ -443,15 +475,29 @@ Desde la raíz:
 conda env create -f environment.yml
 ```
 
-Si el entorno ya existe y cambié dependencias:
+Si ya existe:
 
 ```bash
 conda env update -n axiz-adaptive-rag-payments -f environment.yml --prune
 ```
 
-No necesito crear `.venv` ni ejecutar `pip install`. Las dependencias que están en PyPI y no en conda-forge están declaradas dentro de la sección `pip` del propio `environment.yml`, por lo que la instalación sigue siendo parte de la creación del entorno Conda.
+Este entorno contiene backend, Docling, GLM-OCR, LightRAG y Node 22 para Angular.
 
-### 2. Levantar solo los stores
+### 2. Crear el entorno RAGLight
+
+```bash
+conda env create -f raglight_service/environment.yml
+```
+
+Si ya existe:
+
+```bash
+conda env update -n axiz-raglight-service -f raglight_service/environment.yml --prune
+```
+
+Este segundo environment contiene RAGLight 3.4.7 y su propio árbol de dependencias.
+
+### 3. Levantar solo la infraestructura persistente
 
 En una terminal:
 
@@ -459,33 +505,43 @@ En una terminal:
 docker compose -f infrastructure/docker-compose.yml up qdrant memgraph
 ```
 
-### 3. Ejecutar backend con Conda
+### 4. Ejecutar RAGLight con Conda
 
 En otra terminal, desde la raíz:
+
+```bash
+conda run -n axiz-raglight-service python -m uvicorn pe.axiz.raglight_service.main:app --host 0.0.0.0 --port 8010
+```
+
+### 5. Ejecutar backend con Conda
+
+En otra terminal:
 
 ```bash
 conda run -n axiz-adaptive-rag-payments python -m uvicorn pe.axiz.payment_knowledge.main:app --host 0.0.0.0 --port 8000
 ```
 
-### 4. Precargar el dataset con Conda
+La configuración local por defecto usa `RAGLIGHT_SERVICE_URL=http://localhost:8010`.
 
-Con el backend arriba:
+### 6. Precargar el dataset con Conda
+
+Con backend y RAGLight arriba:
 
 ```bash
-conda run -n axiz-adaptive-rag-payments python datasets/seed.py --wait-seconds 120
+conda run -n axiz-adaptive-rag-payments python datasets/seed.py --wait-seconds 900
 ```
 
-El script llama a la misma API que usa el bootstrap de Docker. Al terminar deberían existir:
+Al terminar deberían existir:
 
 - colección principal `axiz_payment_chunks` en Qdrant;
-- colección `axiz_payment_raglight` cuando RAGLight logra inicializarse;
+- colección `axiz_payment_raglight`;
 - nodos `Document`, `Chunk` y `Entity` en Memgraph;
 - relaciones `CONTAINS`, `MENTIONS` y `CO_OCCURS`;
 - working directory de LightRAG si está configurado.
 
-### 5. Ejecutar Angular con Conda
+### 7. Ejecutar Angular con Conda
 
-Primero instalo los paquetes npm usando el Node que viene dentro del entorno Conda:
+Primero instalo los paquetes npm usando Node del entorno Conda principal:
 
 ```bash
 conda run -n axiz-adaptive-rag-payments npm --prefix frontend install --no-audit --no-fund
@@ -497,11 +553,11 @@ Luego:
 conda run -n axiz-adaptive-rag-payments npm --prefix frontend start
 ```
 
-Abrir `http://localhost:4200`. En desarrollo Angular usa `frontend/proxy.conf.json`; en Docker Nginx hace el mismo proxy. El código del frontend consume `/api/v1` y ya no tiene `http://localhost:8000` hardcodeado.
+Abrir `http://localhost:4200`. En desarrollo Angular usa `frontend/proxy.conf.json`; en Docker Nginx hace el mismo proxy. El frontend consume `/api/v1` y no tiene `http://localhost:8000` hardcodeado.
 
 La interfaz permite:
 
-- precargar nuevamente el dataset si quiero repetir la ingesta;
+- precargar nuevamente el dataset;
 - subir documentos;
 - elegir `auto`, Native RAG, Hybrid RAG, RAGLight, GraphRAG o LightRAG;
 - cambiar `top_k`;
@@ -688,16 +744,23 @@ Backend completo:
 conda run -n axiz-adaptive-rag-payments python scripts/verify.py
 ```
 
-Pruebas unitarias:
+Pruebas unitarias del backend:
 
 ```bash
 conda run -n axiz-adaptive-rag-payments python -m pytest -q backend/tests
+```
+
+Pruebas del servicio RAGLight:
+
+```bash
+conda run -n axiz-raglight-service python -m pytest -q raglight_service/tests
 ```
 
 Chequeo de estilo:
 
 ```bash
 conda run -n axiz-adaptive-rag-payments ruff check backend/src backend/tests datasets
+conda run -n axiz-raglight-service ruff check raglight_service/src raglight_service/tests
 ```
 
 Frontend:
@@ -708,14 +771,23 @@ conda run -n axiz-adaptive-rag-payments npm --prefix frontend run build
 
 ## Estado de validación de esta entrega
 
-La estructura del backend y los tests se validaron antes de volver a empaquetar el proyecto. También validé la sintaxis del `environment.yml` local, de Docker Compose, del proxy Angular/Nginx y que los Dockerfiles ya no dependan de Conda/Micromamba.
+Antes de empaquetar esta versión validé:
 
-El entorno de construcción usado aquí no tiene Docker ni Conda instalados, por lo que no registro una ejecución de `docker compose up --build` ni `conda env create` que no pude hacer. La ejecución reproducible queda definida por `environment.yml`, los Dockerfiles y `infrastructure/docker-compose.yml`.
+- `compileall` del backend, dataset y servicio RAGLight;
+- `8 passed` en `backend/tests`;
+- `2 passed` en `raglight_service/tests`;
+- construcción del wheel del backend sin instalar dependencias;
+- construcción del wheel del servicio RAGLight sin instalar dependencias;
+- sintaxis YAML de `environment.yml`, `raglight_service/environment.yml` e `infrastructure/docker-compose.yml`;
+- que `backend` y `dataset-seed` resuelvan al mismo `image` + `build`;
+- que el `pyproject.toml` del backend principal ya no contenga `raglight`.
+
+El entorno usado para preparar el ZIP no tiene Docker ni Conda y tampoco tiene salida de red desde `pip`, así que no registro una ejecución de `docker compose up --build` ni una resolución online completa que no pude hacer. El conflicto concreto de la ejecución anterior queda eliminado por diseño: Docling y RAGLight ya no comparten el mismo environment Python.
 
 ## Decisiones de alcance
 
 - Qdrant y Memgraph son los únicos contenedores de infraestructura porque son los únicos necesarios para este caso.
-- RAGLight reutiliza Qdrant pero en una colección separada para que la comparación no mezcle índices.
+- RAGLight reutiliza Qdrant pero corre en un servicio Python separado y usa una colección distinta para que la comparación no mezcle índices ni árboles de dependencias.
 - GraphRAG es una implementación propia sobre Memgraph y Hybrid RAG; LightRAG se mantiene como flujo alterno para comparación.
 - La generación se desacopla del retrieval. Esto permite medir retrieval sin que una respuesta de LLM cambie el resultado de Hit Rate o MRR.
 - El modo `auto` no selecciona RAGLight/LightRAG para evitar que el comportamiento base dependa de frameworks o credenciales externas. Esos motores se pueden forzar desde API/UI y se incluyen en evaluación.

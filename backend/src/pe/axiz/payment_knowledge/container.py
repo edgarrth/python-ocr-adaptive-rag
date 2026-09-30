@@ -50,6 +50,7 @@ class AppContainer:
 
     async def close(self) -> None:
         await self.lightrag.close()
+        self.raglight.close()
         self.memgraph.close()
         self.qdrant.close()
 

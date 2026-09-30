@@ -21,7 +21,7 @@ def health() -> HealthResponse:
         status="ok" if qdrant_ok and memgraph_ok else "degraded",
         qdrant=qdrant_ok,
         memgraph=memgraph_ok,
-        raglight=container.raglight.available,
+        raglight=container.raglight.ping(),
         lightrag=container.lightrag.available,
     )
 

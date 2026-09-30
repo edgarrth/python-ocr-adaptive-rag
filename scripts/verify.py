@@ -14,7 +14,19 @@ def run(command: list[str], cwd: Path = ROOT) -> None:
 
 
 def main() -> int:
-    run([sys.executable, "-m", "compileall", "-q", "backend/src", "backend/tests", "datasets/seed.py"])
+    run(
+        [
+            sys.executable,
+            "-m",
+            "compileall",
+            "-q",
+            "backend/src",
+            "backend/tests",
+            "datasets/seed.py",
+            "raglight_service/src",
+            "raglight_service/tests",
+        ]
+    )
     run([sys.executable, "-m", "pytest", "-q", "backend/tests"])
 
     npm = shutil.which("npm")

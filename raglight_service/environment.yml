@@ -1,0 +1,8 @@
+name: axiz-raglight-service
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
+  - pip:
+      - -e ./raglight_service[dev]

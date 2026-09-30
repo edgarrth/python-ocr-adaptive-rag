@@ -1,5 +1,11 @@
 name: axiz-adaptive-rag-payments
 
+x-backend-image: &backend-image
+  image: axiz-adaptive-rag-backend:local
+  build:
+    context: ..
+    dockerfile: backend/Dockerfile
+
 services:
   qdrant:
     image: qdrant/qdrant:v1.19.1
@@ -25,11 +31,29 @@ services:
       - axiz-rag
     restart: unless-stopped
 
-  backend:
-    image: axiz-adaptive-rag-backend:local
+  raglight-service:
+    image: axiz-raglight-service:local
     build:
       context: ..
-      dockerfile: backend/Dockerfile
+      dockerfile: raglight_service/Dockerfile
+    container_name: axiz-rag-raglight
+    environment:
+      QDRANT_URL: http://qdrant:6333
+      RAGLIGHT_COLLECTION: axiz_payment_raglight
+      RAGLIGHT_EMBEDDING_MODEL: sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+      RAGLIGHT_CANONICAL_DIR: /app/.runtime/canonical
+    ports:
+      - "8010:8010"
+    volumes:
+      - runtime_data:/app/.runtime
+    depends_on:
+      - qdrant
+    networks:
+      - axiz-rag
+    restart: unless-stopped
+
+  backend:
+    <<: *backend-image
     container_name: axiz-rag-backend
     environment:
       APP_ENV: docker
@@ -39,6 +63,8 @@ services:
       QDRANT_URL: http://qdrant:6333
       QDRANT_COLLECTION: axiz_payment_chunks
       RAGLIGHT_COLLECTION: axiz_payment_raglight
+      RAGLIGHT_SERVICE_URL: http://raglight-service:8010
+      RAGLIGHT_TIMEOUT_SECONDS: 600
       EMBEDDING_PROVIDER: fastembed
       EMBEDDING_MODEL: sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
       EMBEDDING_DIMENSION: 384
@@ -66,12 +92,13 @@ services:
     depends_on:
       - qdrant
       - memgraph
+      - raglight-service
     networks:
       - axiz-rag
     restart: unless-stopped
 
   dataset-seed:
-    image: axiz-adaptive-rag-backend:local
+    <<: *backend-image
     container_name: axiz-rag-dataset-seed
     command:
       - python
@@ -84,6 +111,7 @@ services:
       - "3"
     depends_on:
       - backend
+      - raglight-service
     networks:
       - axiz-rag
     restart: "no"

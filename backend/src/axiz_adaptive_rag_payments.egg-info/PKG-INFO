@@ -1,0 +1,20 @@
+Metadata-Version: 2.4
+Name: axiz-adaptive-rag-payments
+Version: 0.1.0
+Summary: PoC de RAG adaptativo y GraphRAG para conocimiento de payment processing
+Requires-Python: <3.14,>=3.12
+Requires-Dist: fastapi==0.141.1
+Requires-Dist: uvicorn[standard]==0.54.0
+Requires-Dist: pydantic==2.13.5
+Requires-Dist: pydantic-settings==2.15.0
+Requires-Dist: python-multipart==0.0.32
+Requires-Dist: httpx==0.28.1
+Requires-Dist: qdrant-client[fastembed]==1.19.1
+Requires-Dist: neo4j==6.3.1
+Requires-Dist: docling==2.130.0
+Requires-Dist: glmocr==0.1.5
+Requires-Dist: lightrag-hku==1.5.7
+Provides-Extra: dev
+Requires-Dist: pytest==9.1.1; extra == "dev"
+Requires-Dist: pytest-asyncio==1.4.0; extra == "dev"
+Requires-Dist: ruff==0.16.9; extra == "dev"
