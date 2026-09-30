@@ -1,0 +1,4 @@
+{
+  "strategies": ["native_rag", "hybrid_rag", "raglight", "graphrag", "lightrag"],
+  "top_k": 5
+}

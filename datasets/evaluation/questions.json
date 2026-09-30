@@ -1,0 +1,18 @@
+[
+  {
+    "question": "¿Qué significa el código 05 y qué debería revisar operaciones?",
+    "expected_sources": ["authorization_codes.md"]
+  },
+  {
+    "question": "¿Qué componentes se relacionan entre la autorización y la conciliación?",
+    "expected_sources": ["reconciliation.md"]
+  },
+  {
+    "question": "¿Cómo evita la idempotencia cobros duplicados cuando hay timeout?",
+    "expected_sources": ["idempotency.md"]
+  },
+  {
+    "question": "¿Para qué sirve la tokenización respecto al PAN?",
+    "expected_sources": ["pci_tokenization.md"]
+  }
+]

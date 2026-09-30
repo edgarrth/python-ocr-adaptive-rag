@@ -1,0 +1,7 @@
+{
+  "question": "¿Qué significa el código 05 en ISO 8583?",
+  "strategy": "hybrid_rag",
+  "top_k": 5,
+  "include_trace": true,
+  "include_evidence": true
+}

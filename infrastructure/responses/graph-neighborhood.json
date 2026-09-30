@@ -1,0 +1,6 @@
+{
+  "edges": [
+    {"source": "AUTORIZACIÓN", "target": "ADQUIRENTE", "weight": 2},
+    {"source": "AUTORIZACIÓN", "target": "CONCILIACIÓN", "weight": 1}
+  ]
+}

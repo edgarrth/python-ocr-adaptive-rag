@@ -1,0 +1,28 @@
+{
+  "name": "axiz-adaptive-rag-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "start": "ng serve --host 0.0.0.0 --port 4200",
+    "build": "ng build",
+    "test": "ng test --watch=false"
+  },
+  "dependencies": {
+    "@angular/common": "21.2.24",
+    "@angular/core": "21.2.24",
+    "@angular/forms": "21.2.24",
+    "@angular/platform-browser": "21.2.24",
+    "rxjs": "7.8.2",
+    "tslib": "2.8.1"
+  },
+  "devDependencies": {
+    "@angular-devkit/build-angular": "21.2.24",
+    "@angular/cli": "21.2.24",
+    "@angular/compiler": "21.2.24",
+    "@angular/compiler-cli": "21.2.24",
+    "typescript": "5.9.3"
+  },
+  "engines": {
+    "node": ">=20.19.0 <23 || >=24.0.0"
+  }
+}

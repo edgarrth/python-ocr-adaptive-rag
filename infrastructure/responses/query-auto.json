@@ -1,0 +1,26 @@
+{
+  "answer": "Para la consulta se encontró evidencia en los documentos de autorización y conciliación.",
+  "requested_strategy": "auto",
+  "executed_strategy": "graphrag",
+  "contexts": [
+    {
+      "id": "f2ad3417-25d4-56f8-93f4-47a520ab2c54",
+      "document_id": "0e1f3a7a497a9cd1dd44a621",
+      "source": "reconciliation.md",
+      "title": "Conciliación y liquidación",
+      "text": "La conciliación compara autorizaciones, capturas y registros del adquirente.",
+      "score": 0.048,
+      "strategy": "graphrag",
+      "entities": ["AUTORIZACIÓN", "ADQUIRENTE", "CONCILIACIÓN"],
+      "metadata": {"position": 0}
+    }
+  ],
+  "trace": {
+    "router": {"reason": "relaciones", "signals": ["componentes", "entre"]},
+    "requested_strategy": "auto",
+    "executed_strategy": "graphrag",
+    "returned_contexts": 1,
+    "sources": ["reconciliation.md"]
+  },
+  "timings_ms": {"retrieval": 23.1, "generation": 0.4, "total": 23.6}
+}

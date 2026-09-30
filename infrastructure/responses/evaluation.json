@@ -1,0 +1,10 @@
+{
+  "items": [],
+  "summary": {
+    "native_rag": {"hit_rate": 1.0, "mrr": 0.875, "avg_latency_ms": 16.8, "successful_cases": 4.0, "failed_cases": 0.0},
+    "hybrid_rag": {"hit_rate": 1.0, "mrr": 1.0, "avg_latency_ms": 24.2, "successful_cases": 4.0, "failed_cases": 0.0},
+    "raglight": {"hit_rate": 1.0, "mrr": 0.875, "avg_latency_ms": 31.5, "successful_cases": 4.0, "failed_cases": 0.0},
+    "graphrag": {"hit_rate": 1.0, "mrr": 1.0, "avg_latency_ms": 38.7, "successful_cases": 4.0, "failed_cases": 0.0},
+    "lightrag": {"hit_rate": 0.0, "mrr": 0.0, "avg_latency_ms": 0.0, "successful_cases": 0.0, "failed_cases": 4.0}
+  }
+}

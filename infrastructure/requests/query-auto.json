@@ -1,0 +1,7 @@
+{
+  "question": "¿Qué componentes están relacionados entre una autorización y la conciliación?",
+  "strategy": "auto",
+  "top_k": 5,
+  "include_trace": true,
+  "include_evidence": true
+}
