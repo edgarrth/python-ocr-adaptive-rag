@@ -792,3 +792,26 @@ El entorno usado para preparar el ZIP no tiene Docker ni Conda y tampoco tiene s
 - La generación se desacopla del retrieval. Esto permite medir retrieval sin que una respuesta de LLM cambie el resultado de Hit Rate o MRR.
 - El modo `auto` no selecciona RAGLight/LightRAG para evitar que el comportamiento base dependa de frameworks o credenciales externas. Esos motores se pueden forzar desde API/UI y se incluyen en evaluación.
 - No se agregó un broker, una base relacional o una base documental porque no hay un requisito del caso que lo justifique.
+
+## Optimización del build Docker para dependencias de IA
+
+Docling y RAGLight terminan usando PyTorch. Si se deja que `pip` resuelva PyTorch desde el índice general de PyPI en Linux, puede descargar además paquetes CUDA/NVIDIA de varios gigabytes aunque esta PoC se ejecute en CPU. Eso hace que el primer `docker compose up --build` tarde demasiado.
+
+La imagen se construye ahora desde `infrastructure/Dockerfile.ai` y tiene una etapa base compartida por `backend` y `raglight-service`. Esa etapa instala explícitamente la distribución CPU de PyTorch desde el índice oficial de PyTorch. BuildKit también mantiene una caché de descargas de `pip`, por lo que las reconstrucciones posteriores no deberían repetir las descargas grandes si las dependencias no cambian.
+
+No se usa Conda dentro de Docker. Conda queda únicamente para trabajar localmente desde el IDE.
+
+El primer build seguirá siendo más pesado que un servicio web normal porque Docling, Transformers y Sentence Transformers son dependencias de IA, pero no debería descargar el stack CUDA completo dos veces.
+
+Para ver el detalle de lo que Docker está descargando o instalando:
+
+```bash
+BUILDKIT_PROGRESS=plain docker compose -f infrastructure/docker-compose.yml build backend raglight-service
+```
+
+Después se levanta todo normalmente:
+
+```bash
+docker compose -f infrastructure/docker-compose.yml up --build
+```
+

@@ -4,7 +4,8 @@ x-backend-image: &backend-image
   image: axiz-adaptive-rag-backend:local
   build:
     context: ..
-    dockerfile: backend/Dockerfile
+    dockerfile: infrastructure/Dockerfile.ai
+    target: backend
 
 services:
   qdrant:
@@ -35,7 +36,8 @@ services:
     image: axiz-raglight-service:local
     build:
       context: ..
-      dockerfile: raglight_service/Dockerfile
+      dockerfile: infrastructure/Dockerfile.ai
+      target: raglight
     container_name: axiz-rag-raglight
     environment:
       QDRANT_URL: http://qdrant:6333
