@@ -42,7 +42,8 @@ FROM ai-base AS raglight
 COPY raglight_service/pyproject.toml /app/pyproject.toml
 COPY raglight_service/src /app/src
 RUN --mount=type=cache,target=/root/.cache/pip \
-    python -m pip install .
+    python -m pip install . \
+    && python -c "from raglight.config.settings import Settings; from raglight.rag.builder import Builder; import importlib.metadata as m; print('RAGLight compatibility:', {p: m.version(p) for p in ['raglight','langgraph','langgraph-prebuilt','langgraph-checkpoint','langgraph-sdk','qdrant-client']})"
 
 EXPOSE 8010
 CMD ["python", "-m", "uvicorn", "pe.axiz.raglight_service.main:app", "--host", "0.0.0.0", "--port", "8010"]

@@ -23,21 +23,21 @@ def health() -> HealthResponse:
         memgraph=memgraph_ok,
         raglight=container.raglight.ping(),
         lightrag=container.lightrag.available,
+        hf_token_configured=bool(container.settings.hf_token.strip()),
     )
 
 
 @router.post("/documents/ingest", response_model=IngestResponse)
 async def ingest_document(file: UploadFile = File(...)) -> IngestResponse:
-    suffix = Path(file.filename or "document.bin").suffix
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp:
-        shutil.copyfileobj(file.file, temp)
-        temp_path = Path(temp.name)
-    try:
-        return await get_container().ingestion.ingest_path(temp_path)
-    except Exception as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    finally:
-        temp_path.unlink(missing_ok=True)
+    source_name = Path(file.filename or "document.bin").name
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir) / source_name
+        with temp_path.open("wb") as target:
+            shutil.copyfileobj(file.file, target)
+        try:
+            return await get_container().ingestion.ingest_path(temp_path)
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.post("/datasets/seed", response_model=list[IngestResponse])

@@ -2,8 +2,24 @@ from __future__ import annotations
 
 import hashlib
 import math
+import os
 import re
 from collections.abc import Iterable
+
+
+def configure_huggingface_environment() -> bool:
+    """Normaliza credenciales de Hugging Face sin exponer el token en logs."""
+    token = (
+        os.getenv("HF_TOKEN", "").strip()
+        or os.getenv("HUGGING_FACE_HUB_TOKEN", "").strip()
+        or os.getenv("HUGGINGFACE_HUB_TOKEN", "").strip()
+    )
+    if not token:
+        return False
+    os.environ["HF_TOKEN"] = token
+    os.environ.setdefault("HUGGING_FACE_HUB_TOKEN", token)
+    os.environ.setdefault("HUGGINGFACE_HUB_TOKEN", token)
+    return True
 
 
 class HashingEmbedder:
@@ -40,6 +56,7 @@ class FastEmbedEmbedder:
         items = list(texts)
         try:
             if self._model is None:
+                configure_huggingface_environment()
                 from fastembed import TextEmbedding
 
                 self._model = TextEmbedding(model_name=self.model_name)

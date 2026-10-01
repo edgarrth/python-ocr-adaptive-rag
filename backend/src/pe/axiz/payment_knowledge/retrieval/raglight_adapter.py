@@ -32,16 +32,35 @@ class RagLightAdapter:
         except httpx.HTTPError:
             return False
 
-    def index(self, path: Path | None = None) -> bool:
+    def ready(self) -> bool:
         if not self.available:
             return False
-        target = (path or self.canonical_dir).resolve()
-        try:
-            response = self._client.post("/index", json={"path": str(target)})
-            response.raise_for_status()
-            return bool(response.json().get("indexed", False))
-        except (httpx.HTTPError, ValueError):
+        response = self._client.get("/ready")
+        self._raise_for_status(response, "ready")
+        payload = response.json()
+        if payload.get("ready") is not True:
+            raise RuntimeError(f"RAGLight no confirmó readiness: {payload}")
+        return True
+
+    def reset(self) -> None:
+        if not self.available:
+            return
+        response = self._client.post("/reset")
+        self._raise_for_status(response, "reset")
+        payload = response.json()
+        if payload.get("reset") is not True:
+            raise RuntimeError("RAGLight no confirmó el reinicio de sus colecciones")
+
+    def index(self, directory: Path | None = None) -> bool:
+        if not self.available:
             return False
+        target = (directory or self.canonical_dir).resolve()
+        response = self._client.post("/index", json={"path": str(target)})
+        self._raise_for_status(response, "index")
+        payload = response.json()
+        if payload.get("indexed") is not True:
+            raise RuntimeError(f"RAGLight no confirmó la indexación: {payload}")
+        return True
 
     def retrieve(self, question: str, top_k: int) -> list[ContextItem]:
         if not self.available:
@@ -51,7 +70,7 @@ class RagLightAdapter:
             "/search",
             json={"question": question, "top_k": top_k},
         )
-        response.raise_for_status()
+        self._raise_for_status(response, "search")
         payload = response.json()
         if not isinstance(payload, list):
             raise RuntimeError("RAGLight devolvió un payload de búsqueda inesperado")
@@ -75,6 +94,22 @@ class RagLightAdapter:
             )
         return result
 
+
+    @staticmethod
+    def _raise_for_status(response: httpx.Response, operation: str) -> None:
+        if not response.is_error:
+            return
+        detail = response.text
+        try:
+            payload = response.json()
+            if isinstance(payload, dict) and payload.get("detail"):
+                detail = str(payload["detail"])
+        except ValueError:
+            pass
+        raise RuntimeError(
+            f"RAGLight {operation} falló con HTTP {response.status_code}: {detail}"
+        )
+
     def close(self) -> None:
         self._client.close()
 
@@ -83,6 +118,4 @@ class RagLightAdapter:
         name = Path(source).name
         if "__" in name:
             name = name.split("__", 1)[1]
-        if name.endswith(".md") and name.count(".") > 1:
-            name = name[:-3]
         return name

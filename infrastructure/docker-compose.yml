@@ -9,7 +9,7 @@ x-backend-image: &backend-image
 
 services:
   qdrant:
-    image: qdrant/qdrant:v1.19.1
+    image: qdrant/qdrant:v1.18.3
     container_name: axiz-rag-qdrant
     ports:
       - "6333:6333"
@@ -34,6 +34,9 @@ services:
 
   raglight-service:
     image: axiz-raglight-service:local
+    env_file:
+      - path: ../.env
+        required: false
     build:
       context: ..
       dockerfile: infrastructure/Dockerfile.ai
@@ -41,13 +44,15 @@ services:
     container_name: axiz-rag-raglight
     environment:
       QDRANT_URL: http://qdrant:6333
-      RAGLIGHT_COLLECTION: axiz_payment_raglight
-      RAGLIGHT_EMBEDDING_MODEL: sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
       RAGLIGHT_CANONICAL_DIR: /app/.runtime/canonical
+      HF_HOME: /app/.cache/huggingface
+      HUGGINGFACE_HUB_CACHE: /app/.cache/huggingface/hub
+      SENTENCE_TRANSFORMERS_HOME: /app/.cache/sentence-transformers
     ports:
       - "8010:8010"
     volumes:
       - runtime_data:/app/.runtime
+      - hf_cache_data:/app/.cache
     depends_on:
       - qdrant
     networks:
@@ -57,40 +62,27 @@ services:
   backend:
     <<: *backend-image
     container_name: axiz-rag-backend
+    env_file:
+      - path: ../.env
+        required: false
     environment:
       APP_ENV: docker
       API_HOST: 0.0.0.0
       API_PORT: 8000
-      CORS_ORIGINS: http://localhost:4200
       QDRANT_URL: http://qdrant:6333
-      QDRANT_COLLECTION: axiz_payment_chunks
-      RAGLIGHT_COLLECTION: axiz_payment_raglight
-      RAGLIGHT_SERVICE_URL: http://raglight-service:8010
-      RAGLIGHT_TIMEOUT_SECONDS: 600
-      EMBEDDING_PROVIDER: fastembed
-      EMBEDDING_MODEL: sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
-      EMBEDDING_DIMENSION: 384
       MEMGRAPH_URI: bolt://memgraph:7687
-      MEMGRAPH_USER: ""
-      MEMGRAPH_PASSWORD: ""
-      LLM_PROVIDER: ${LLM_PROVIDER:-extractive}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
-      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5-mini}
-      OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
-      OPENAI_EMBEDDING_DIMENSION: ${OPENAI_EMBEDDING_DIMENSION:-1536}
-      GLM_OCR_MODE: ${GLM_OCR_MODE:-maas}
-      GLM_OCR_API_URL: ${GLM_OCR_API_URL:-}
-      ZHIPU_API_KEY: ${ZHIPU_API_KEY:-}
-      OCR_MIN_TEXT_CHARS: 120
-      RAGLIGHT_ENABLED: ${RAGLIGHT_ENABLED:-true}
-      LIGHTRAG_ENABLED: ${LIGHTRAG_ENABLED:-true}
+      RAGLIGHT_SERVICE_URL: http://raglight-service:8010
       LIGHTRAG_WORKDIR: /app/.runtime/lightrag
       DATASETS_DIR: /app/datasets/sample_documents
+      HF_HOME: /app/.cache/huggingface
+      HUGGINGFACE_HUB_CACHE: /app/.cache/huggingface/hub
+      SENTENCE_TRANSFORMERS_HOME: /app/.cache/sentence-transformers
+      FASTEMBED_CACHE_PATH: /app/.cache/fastembed
     ports:
       - "8000:8000"
     volumes:
       - runtime_data:/app/.runtime
+      - hf_cache_data:/app/.cache
     depends_on:
       - qdrant
       - memgraph
@@ -143,3 +135,4 @@ volumes:
   qdrant_data:
   memgraph_data:
   runtime_data:
+  hf_cache_data:

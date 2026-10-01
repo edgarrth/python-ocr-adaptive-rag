@@ -36,11 +36,18 @@ Las versiones principales están fijadas para evitar cambios sorpresivos. Doclin
 | Pydantic Settings | 2.15.0 |
 | Docling | 2.130.0 |
 | GLM-OCR SDK | 0.1.5 |
-| Qdrant Server | 1.19.1 |
-| qdrant-client | 1.19.1 |
+| Qdrant Server | 1.18.3 |
+| qdrant-client backend | 1.19.1 |
+| qdrant-client RAGLight | 1.17.0 (dependencia fijada por RAGLight 3.4.7) |
+
+La versión de Qdrant no está elegida al azar. RAGLight 3.4.7 exige `qdrant-client==1.17.0` y el backend usa `qdrant-client==1.19.1`; Qdrant Server `1.18.3` es el punto común compatible porque la diferencia de versión menor es de uno en ambos casos. No se fuerza una versión de cliente distinta dentro de RAGLight.
 | Memgraph | 3.13.1 |
 | Neo4j Python Driver | 6.3.1, usado solo como cliente Bolt para Memgraph |
 | RAGLight | 3.4.7 |
+| LangGraph en RAGLight | 1.0.5 |
+| langgraph-prebuilt en RAGLight | 1.0.5 |
+| langgraph-checkpoint en RAGLight | 3.0.1 |
+| langgraph-sdk en RAGLight | 0.3.0 |
 | LightRAG | 1.5.7 |
 | Angular | 21.2.24 |
 | TypeScript | 5.9.3 |
@@ -118,8 +125,9 @@ El servicio RAGLight no agrega una nueva base ni duplica infraestructura. Sigue 
 7. `PaymentEntityExtractor` detecta conceptos de pagos y códigos que sirven para el grafo.
 8. Los chunks se indexan en Qdrant.
 9. Documentos, chunks, entidades y relaciones de co-ocurrencia se materializan en Memgraph.
-10. El backend envía la ruta del documento canónico al servicio `raglight-service`; ambos comparten el volumen `.runtime`, por lo que RAGLight indexa exactamente el mismo contenido normalizado.
-11. Si LightRAG está configurado con un proveedor OpenAI-compatible, el contenido también se inserta en su índice.
+10. Para una carga individual, el backend crea un directorio de staging con el Markdown canónico y RAGLight indexa ese directorio. Para el dataset inicial, primero se normalizan todos los documentos y después RAGLight indexa el directorio canónico completo en una sola operación.
+11. Antes de la precarga del dataset se reinician únicamente las colecciones propias de RAGLight para evitar duplicados en un framework que genera IDs nuevos en cada ingesta.
+12. Si LightRAG está configurado con un proveedor OpenAI-compatible, el contenido también se inserta en su índice.
 
 El identificador de cada chunk es un UUID determinista para que Qdrant acepte el punto y para que reingestar el mismo contenido no cree identificadores distintos. Las relaciones `CO_OCCURS` de Memgraph también incluyen el `chunk_id`, de modo que una segunda carga no infla artificialmente los pesos.
 
@@ -141,11 +149,13 @@ La intención es que consultas como `código 05` no pierdan el identificador exa
 
 ### RAGLight
 
-`RagLightAdapter` ya no importa el paquete RAGLight dentro del backend. Consume por HTTP un servicio Python independiente definido en `raglight_service/`. Ese servicio carga RAGLight 3.4.7, usa una colección Qdrant propia, embeddings Hugging Face y `SEARCH_HYBRID`. El framework combina BM25 + búsqueda semántica + RRF.
+`RagLightAdapter` ya no importa el paquete RAGLight dentro del backend. Consume por HTTP un servicio Python independiente definido en `raglight_service/`. Ese servicio carga RAGLight 3.4.7, usa una colección Qdrant propia, embeddings Hugging Face y `SEARCH_HYBRID`. El framework combina BM25 + búsqueda semántica + RRF. La integración usa directorios porque `VectorStore.ingest(data_path=...)` de RAGLight espera una carpeta, no un archivo individual.
 
 La separación es intencional. Docling 2.130.0 y RAGLight 3.4.7 no pueden convivir hoy en el mismo environment por el pin incompatible de `typer`. Mantenerlos en contenedores y entornos Conda distintos permite conservar las dos versiones sin `--no-deps`, sin forzar un `typer` incorrecto y sin degradar Docling.
 
-RAGLight se usa como motor de retrieval alternativo y la generación sigue en la capa común. Así puedo comparar `Native/Hybrid implementado por nosotros` contra `Hybrid provisto por RAGLight` sin mezclar diferencias del modelo generativo.
+Además fijo el conjunto LangGraph usado dentro de RAGLight (`langgraph==1.0.5`, `langgraph-prebuilt==1.0.5`, `langgraph-checkpoint==3.0.1`, `langgraph-sdk==0.3.0`). La razón es reproducibilidad: `langgraph-prebuilt` 1.0.x admite versiones más nuevas dentro de su rango, pero releases posteriores empezaron a importar `ExecutionInfo`/`ServerInfo` desde `langgraph.runtime`, APIs que no están disponibles en `langgraph==1.0.5`. Sin el pin, pip puede resolver una combinación que instala correctamente pero falla al importar RAGLight en runtime. El Dockerfile ejecuta un import de compatibilidad durante el build para detectar esta clase de error antes de levantar los contenedores.
+
+RAGLight se usa como motor de retrieval alternativo y la generación sigue en la capa común. Así puedo comparar `Native/Hybrid implementado por nosotros` contra `Hybrid provisto por RAGLight` sin mezclar diferencias del modelo generativo. El servicio valida la ingesta comparando la cantidad de puntos de Qdrant antes y después; si RAGLight no agrega al menos un punto por documento canónico, devuelve error y el bootstrap falla en vez de marcar un falso positivo.
 
 ### GraphRAG
 
@@ -294,13 +304,40 @@ Los puntos que conviene revisar primero son:
 
 Los JSON usados en los ejemplos están en `infrastructure/requests` y `infrastructure/responses`.
 
-El servicio RAGLight expone tres endpoints internos. El frontend no los consume directamente; el backend actúa como fachada.
+El servicio RAGLight expone cinco endpoints internos. El frontend no los consume directamente; el backend actúa como fachada.
 
 | Método y endpoint | Uso técnico |
 | --- | --- |
 | `GET http://raglight-service:8010/health` | comprobar que el proceso HTTP está disponible |
-| `POST http://raglight-service:8010/index` | indexar un Markdown canónico compartido por volumen |
+| `POST http://raglight-service:8010/reset` | limpiar las colecciones propias de RAGLight antes de una precarga determinista |
+| `GET http://raglight-service:8010/ready` | inicializar embeddings y Qdrant, validando credenciales/descarga antes de la ingesta |
+| `POST http://raglight-service:8010/index` | indexar un directorio de documentos canónicos compartido por volumen y verificar que se creen puntos |
 | `POST http://raglight-service:8010/search` | ejecutar retrieval híbrido RAGLight y devolver evidencia al backend |
+
+## Variables del `.env` en Docker
+
+El archivo `.env` está en la raíz del proyecto, mientras que el Compose vive en `infrastructure/`. Como se ejecuta con `-f infrastructure/docker-compose.yml`, Docker Compose considera `infrastructure/` como directorio del proyecto para la interpolación automática. Para evitar que un `HF_TOKEN`, `OPENAI_API_KEY`, `ZHIPU_API_KEY` u otra variable del `.env` raíz quede fuera de los contenedores, esta versión declara `env_file: ../.env` explícitamente en `backend` y `raglight-service`.
+
+Las URLs que cambian dentro de Docker (`QDRANT_URL`, `MEMGRAPH_URI`, `RAGLIGHT_SERVICE_URL`, `LIGHTRAG_WORKDIR` y `DATASETS_DIR`) se sobrescriben después con valores internos de la red Compose. Las credenciales y switches del `.env` no se pisan con valores vacíos.
+
+Además, backend y RAGLight comparten un volumen de cache de Hugging Face y usan `HF_HOME`, `HUGGINGFACE_HUB_CACHE` y `SENTENCE_TRANSFORMERS_HOME`. El token nunca se imprime; los endpoints de salud solo muestran `hf_token_configured=true/false`.
+
+Para confirmar que el token llegó al contenedor sin mostrarlo:
+
+```bash
+docker compose -f infrastructure/docker-compose.yml exec backend python -c 'import os; print(bool(os.getenv("HF_TOKEN")))'
+docker compose -f infrastructure/docker-compose.yml exec raglight-service python -c 'import os; print(bool(os.getenv("HF_TOKEN")))'
+```
+
+También se puede consultar:
+
+```bash
+curl -s http://localhost:8000/api/v1/health | python -m json.tool
+curl -s http://localhost:8010/health | python -m json.tool
+```
+
+RAGLight incorpora además `GET /ready`: inicializa el modelo de embeddings y Qdrant antes de procesar el dataset. Si falla una descarga, autenticación o inicialización, el bootstrap termina temprano con el error real en vez de esperar hasta `/index`. Los errores HTTP del servicio conservan ahora el `detail` original y el servicio registra el traceback completo. El endpoint `GET /health` también informa las versiones efectivas de RAGLight, LangGraph, `langgraph-prebuilt`, checkpoint, SDK y qdrant-client para que una incompatibilidad transitiva sea visible sin entrar al contenedor.
+
 
 ## Requisitos
 
@@ -334,11 +371,24 @@ Ese único comando hace el bootstrap completo:
 3. construye y levanta `raglight-service` con Python 3.12 y RAGLight 3.4.7;
 4. construye y levanta el backend principal con Python 3.12, Docling, GLM-OCR y LightRAG;
 5. ejecuta `dataset-seed` como contenedor de una sola corrida usando la misma definición de build del backend;
-6. `dataset-seed` espera a que la ruta de ingesta esté disponible y llama a `POST /api/v1/datasets/seed`;
-7. se crean chunks, vectores, nodos, relaciones y el índice RAGLight;
-8. cuando el seed termina correctamente, levanta el frontend Angular.
+6. `dataset-seed` espera como máximo 900 segundos solo por la disponibilidad de backend/Qdrant/Memgraph y luego llama una única vez a `POST /api/v1/datasets/seed`;
+7. se crean chunks, vectores, nodos y relaciones; RAGLight reinicia sus colecciones e indexa el directorio canónico completo una sola vez;
+8. `dataset-seed` termina con código `0` solo si las rutas obligatorias habilitadas concluyen correctamente;
+9. cuando el seed termina correctamente, levanta el frontend Angular.
 
-No hay que ejecutar inserts ni scripts de carga después. `dataset-seed` termina con código `0` cuando la precarga finaliza; eso es esperado.
+No hay que ejecutar inserts ni scripts de carga después. `dataset-seed` termina con código `0` cuando la precarga finaliza; eso es esperado. El límite de 900 segundos aplica únicamente a la espera inicial de infraestructura, no al procesamiento de LightRAG/RAGLight. La llamada de indexación no tiene timeout de lectura por defecto, porque la primera construcción de embeddings y grafo puede durar bastante más de 15 minutos. Si una ruta obligatoria habilitada falla, el backend devuelve error, `dataset-seed` termina distinto de cero y el frontend no arranca como si la PoC estuviera completa.
+
+### Compatibilidad LangGraph dentro de RAGLight
+
+Si aparece `ImportError: cannot import name 'ExecutionInfo' from 'langgraph.runtime'`, no es un problema de `HF_TOKEN`: significa que `langgraph-prebuilt` quedó más nuevo que el `langgraph` compatible con RAGLight. Esta versión fija el conjunto probado y además valida el import durante el build. Si esa validación falla, Docker debe detenerse en la construcción de `raglight-service` en vez de arrancar un contenedor roto.
+
+Para comprobar las versiones en ejecución:
+
+```bash
+curl -s http://localhost:8010/health | python -m json.tool
+```
+
+Debe mostrar, entre otros valores, `raglight=3.4.7`, `langgraph=1.0.5` y `langgraph-prebuilt=1.0.5`.
 
 ### Por qué backend y RAGLight se construyen por separado
 
@@ -393,6 +443,8 @@ cp .env.example .env
 
 Para Docker, Compose usa las variables del `.env` ubicado en la raíz. Las direcciones internas de Qdrant y Memgraph ya están definidas en `infrastructure/docker-compose.yml`, por eso no tengo que cambiar sus URLs para ejecutar el stack completo.
 
+`CORS_ORIGINS` se mantiene como texto para evitar que `pydantic-settings` intente decodificarlo como JSON antes de aplicar la configuración. Acepto ambas formas: `http://localhost:4200,http://localhost:8080` o `["http://localhost:4200","http://localhost:8080"]`. Para esta PoC basta `http://localhost:4200`.
+
 | Variable | ¿Obligatoria? | Para qué sirve | De dónde sale |
 | --- | --- | --- | --- |
 | `LLM_PROVIDER` | No | `extractive` no llama a ningún LLM; `openai` activa síntesis generativa | valor de configuración |
@@ -411,8 +463,9 @@ Para Docker, Compose usa las variables del `.env` ubicado en la raíz. Las direc
 | `QDRANT_*` | No para Docker | colección y conexión vectorial | la PoC levanta Qdrant local |
 | `MEMGRAPH_*` | No para Docker | conexión al grafo | la PoC levanta Memgraph local sin usuario/password |
 | `EMBEDDING_*` | No | embeddings usados por Native/Hybrid/RAGLight | modelo público configurado; no necesita token |
+| `HF_TOKEN` | No | autenticación opcional contra Hugging Face Hub | evita el warning de acceso anónimo y puede mejorar límites/velocidad de descarga |
 
-Docling no requiere API key. RAGLight tampoco requiere API key en esta PoC porque usa embeddings públicos/Hugging Face y Qdrant local. Qdrant y Memgraph tampoco necesitan tokens con la configuración del Compose.
+Docling no requiere API key. RAGLight tampoco requiere API key en esta PoC porque usa embeddings públicos/Hugging Face y Qdrant local. `HF_TOKEN` es opcional: sin él la descarga funciona de forma anónima, pero Hugging Face puede mostrar un warning y aplicar límites más bajos. Qdrant y Memgraph tampoco necesitan tokens con la configuración del Compose.
 
 GLM-OCR solo necesita `ZHIPU_API_KEY` cuando el documento cae en la ruta OCR y `GLM_OCR_MODE=maas`. Los `.md` del dataset inicial no usan OCR, por eso el bootstrap puede terminar sin esa clave.
 
@@ -531,6 +584,14 @@ Con backend y RAGLight arriba:
 conda run -n axiz-adaptive-rag-payments python datasets/seed.py --wait-seconds 900
 ```
 
+`--wait-seconds` no limita la duración de la indexación. Si quiero imponer explícitamente un máximo de procesamiento, por ejemplo una hora, puedo usar:
+
+```bash
+conda run -n axiz-adaptive-rag-payments python datasets/seed.py --wait-seconds 900 --processing-timeout-seconds 3600
+```
+
+Con `--processing-timeout-seconds 0` (valor por defecto) la lectura queda sin límite y el proceso termina cuando el backend completa o devuelve un error real.
+
 Al terminar deberían existir:
 
 - colección principal `axiz_payment_chunks` en Qdrant;
@@ -573,7 +634,7 @@ conda run -n axiz-adaptive-rag-payments npm --prefix frontend run build
 
 ## Qué se inserta automáticamente al levantar Docker
 
-El servicio `dataset-seed` usa `datasets/seed.py` y espera hasta 900 segundos por el backend. No usa un health check infinito: intenta la carga, espera tres segundos si la infraestructura todavía no está lista y termina apenas recibe una respuesta exitosa.
+El servicio `dataset-seed` usa `datasets/seed.py` y separa dos tiempos distintos. `--wait-seconds 900` controla únicamente cuánto se espera a que backend, Qdrant y Memgraph estén disponibles. Una vez que la infraestructura responde, la llamada a `POST /api/v1/datasets/seed` se ejecuta una sola vez y por defecto no tiene timeout de lectura (`--processing-timeout-seconds 0`), de modo que LightRAG pueda terminar una indexación larga sin ser abortado artificialmente a los 900 segundos. Los errores funcionales HTTP del seed siguen siendo terminales y no se reintenta toda la carga para evitar duplicar trabajo parcial.
 
 La carga recorre `datasets/sample_documents` y ejecuta el mismo pipeline que una carga manual:
 
@@ -588,7 +649,7 @@ documento
   -> LightRAG cuando está configurado
 ```
 
-Qdrant usa IDs deterministas para los chunks y Memgraph usa `MERGE`, por lo que volver a cargar el corpus no crea copias nuevas de esos elementos base.
+Qdrant usa IDs deterministas para los chunks y Memgraph usa `MERGE`, por lo que volver a cargar el corpus no crea copias nuevas de esos elementos base. RAGLight usa IDs propios no deterministas, por eso su colección se reinicia antes del seed y se indexa el corpus completo una sola vez. RAGLight 3.4.7 fija `qdrant-client==1.17.0`, mientras que el backend principal usa `qdrant-client==1.19.1`. Por eso Qdrant Server se fija en `1.18.3`: es la versión más reciente de la rama 1.18 y queda a una versión menor de ambos clientes, evitando el conflicto del resolver y la advertencia de compatibilidad en runtime.
 
 ## Pruebas con curl
 
@@ -814,4 +875,10 @@ Después se levanta todo normalmente:
 ```bash
 docker compose -f infrastructure/docker-compose.yml up --build
 ```
+
+
+
+### Compatibilidad Qdrant y RAGLight
+
+No se debe agregar manualmente `qdrant-client==1.19.1` al servicio RAGLight. RAGLight 3.4.7 declara `qdrant-client==1.17.0` en su extra `qdrant`; forzarlo a 1.19.1 hace que `pip` termine con `ResolutionImpossible`. La PoC usa Qdrant Server 1.18.3 para mantener compatibilidad simultánea con el cliente 1.17.0 de RAGLight y el 1.19.1 del backend principal.
 

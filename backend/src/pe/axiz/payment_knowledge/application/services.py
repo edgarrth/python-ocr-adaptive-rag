@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 import time
 from pathlib import Path
 
@@ -17,7 +18,7 @@ from pe.axiz.payment_knowledge.domain.models import (
     RetrievalStrategy,
 )
 from pe.axiz.payment_knowledge.generation.llm import AnswerGenerator
-from pe.axiz.payment_knowledge.infrastructure.document_processing import DocumentProcessor, PaymentEntityExtractor, SemanticChunker
+from pe.axiz.payment_knowledge.infrastructure.document_processing import DocumentProcessor, PaymentEntityExtractor, SemanticChunker, canonical_markdown_name
 from pe.axiz.payment_knowledge.infrastructure.memgraph_store import MemgraphStore
 from pe.axiz.payment_knowledge.infrastructure.qdrant_store import QdrantStore
 from pe.axiz.payment_knowledge.retrieval.graphrag import GraphRagRetriever
@@ -50,15 +51,38 @@ class IngestionService:
         self.canonical_dir.mkdir(parents=True, exist_ok=True)
 
     async def ingest_path(self, path: Path) -> IngestResponse:
+        return await self._ingest_path(path, index_raglight=True, index_lightrag=True)
+
+    async def _ingest_path(
+        self,
+        path: Path,
+        *,
+        index_raglight: bool,
+        index_lightrag: bool,
+    ) -> IngestResponse:
         document = await asyncio.to_thread(self.processor.parse, path)
         chunks = self.chunker.split(document)
         await asyncio.to_thread(self.qdrant.upsert, chunks)
         await asyncio.to_thread(self.memgraph.upsert_document, chunks)
 
-        canonical_path = self.canonical_dir / f"{document.document_id}__{document.source_name}.md"
+        canonical_path = self._canonical_path(document.document_id, document.source_name)
         canonical_path.write_text(document.markdown, encoding="utf-8")
-        raglight_indexed = await asyncio.to_thread(self.raglight.index, canonical_path)
-        lightrag_indexed = await self.lightrag.index(canonical_path)
+
+        raglight_indexed = False
+        if index_raglight and self.raglight.available:
+            stage_dir = self.canonical_dir / "_raglight_stage" / document.document_id
+            stage_dir.mkdir(parents=True, exist_ok=True)
+            staged_file = stage_dir / canonical_path.name
+            shutil.copy2(canonical_path, staged_file)
+            try:
+                raglight_indexed = await asyncio.to_thread(self.raglight.index, stage_dir)
+            finally:
+                shutil.rmtree(stage_dir, ignore_errors=True)
+
+        lightrag_indexed = False
+        if index_lightrag and self.lightrag.available:
+            lightrag_indexed = await self.lightrag.index(canonical_path)
+
         return IngestResponse(
             document_id=document.document_id,
             source=document.source_name,
@@ -71,11 +95,49 @@ class IngestionService:
         )
 
     async def ingest_dataset(self) -> list[IngestResponse]:
-        results = []
+        self._remove_legacy_canonical_files()
+
+        if self.raglight.available:
+            if not await asyncio.to_thread(self.raglight.ping):
+                raise RuntimeError("RAGLight está habilitado pero su servicio no está disponible")
+            await asyncio.to_thread(self.raglight.reset)
+            if not await asyncio.to_thread(self.raglight.ready):
+                raise RuntimeError("RAGLight no completó su preparación de embeddings/Qdrant")
+
+        if self.lightrag.available:
+            await self.lightrag.reset()
+
+        results: list[IngestResponse] = []
         for path in sorted(self.settings.datasets_dir.glob("*")):
             if path.is_file():
-                results.append(await self.ingest_path(path))
+                results.append(
+                    await self._ingest_path(
+                        path,
+                        index_raglight=False,
+                        index_lightrag=True,
+                    )
+                )
+
+        raglight_indexed = False
+        if self.raglight.available:
+            raglight_indexed = await asyncio.to_thread(self.raglight.index, self.canonical_dir)
+            if not raglight_indexed:
+                raise RuntimeError("RAGLight no confirmó la indexación del dataset")
+
+        if raglight_indexed:
+            results = [
+                result.model_copy(update={"raglight_indexed": True})
+                for result in results
+            ]
         return results
+
+    def _canonical_path(self, document_id: str, source_name: str) -> Path:
+        return self.canonical_dir / canonical_markdown_name(document_id, source_name)
+
+    def _remove_legacy_canonical_files(self) -> None:
+        for path in self.canonical_dir.glob("*.md.md"):
+            path.unlink(missing_ok=True)
+        shutil.rmtree(self.canonical_dir / "_raglight_stage", ignore_errors=True)
 
 
 class QueryService:

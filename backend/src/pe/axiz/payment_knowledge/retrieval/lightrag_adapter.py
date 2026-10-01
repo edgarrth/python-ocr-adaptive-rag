@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -22,14 +23,19 @@ class LightRagAdapter:
     async def index(self, path: Path | None = None) -> bool:
         if not self.available:
             return False
-        try:
-            rag = await self._get_rag()
-            paths = [path] if path else sorted(self.canonical_dir.glob("*.md"))
-            for item in paths:
-                await rag.ainsert(item.read_text(encoding="utf-8"), file_paths=str(item))
-            return True
-        except Exception:
-            return False
+        rag = await self._get_rag()
+        paths = [path] if path else sorted(self.canonical_dir.glob("*.md"))
+        for item in paths:
+            await rag.ainsert(item.read_text(encoding="utf-8"), file_paths=str(item))
+        return True
+
+    async def reset(self) -> None:
+        """Reinicia el storage LightRAG solo cuando el motor está realmente configurado."""
+        if not self.available:
+            return
+        await self.close()
+        shutil.rmtree(self.settings.lightrag_workdir, ignore_errors=True)
+        self.settings.lightrag_workdir.mkdir(parents=True, exist_ok=True)
 
     async def retrieve(self, question: str, top_k: int) -> list[ContextItem]:
         if not self.available:

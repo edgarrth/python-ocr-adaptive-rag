@@ -73,6 +73,7 @@ class HealthResponse(BaseModel):
     memgraph: bool
     raglight: bool
     lightrag: bool
+    hf_token_configured: bool
 
 
 class EvaluationRequest(BaseModel):

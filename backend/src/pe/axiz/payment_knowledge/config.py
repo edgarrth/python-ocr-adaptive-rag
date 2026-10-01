@@ -1,7 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
+import json
 
-from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     app_env: str = "local"
     api_host: str = "0.0.0.0"
     api_port: int = 8000
-    cors_origins: list[str] = ["http://localhost:4200"]
+    cors_origins: str = "http://localhost:4200"
 
     qdrant_url: str = "http://localhost:6333"
     qdrant_collection: str = "axiz_payment_chunks"
@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     embedding_provider: str = "fastembed"
     embedding_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
     embedding_dimension: int = 384
+    hf_token: str = ""
 
     memgraph_uri: str = "bolt://localhost:7687"
     memgraph_user: str = ""
@@ -46,12 +47,19 @@ class Settings(BaseSettings):
     lightrag_workdir: Path = Path(".runtime/lightrag")
     datasets_dir: Path = Path("datasets/sample_documents")
 
-    @field_validator("cors_origins", mode="before")
-    @classmethod
-    def parse_origins(cls, value: object) -> object:
-        if isinstance(value, str):
-            return [part.strip() for part in value.split(",") if part.strip()]
-        return value
+    def parsed_cors_origins(self) -> list[str]:
+        """Acepta CORS_ORIGINS como CSV o como arreglo JSON sin depender del decoder de settings."""
+        raw = self.cors_origins.strip()
+        if not raw:
+            return []
+        if raw.startswith("["):
+            try:
+                value = json.loads(raw)
+            except json.JSONDecodeError:
+                value = None
+            if isinstance(value, list):
+                return [str(item).strip() for item in value if str(item).strip()]
+        return [part.strip() for part in raw.split(",") if part.strip()]
 
 
 @lru_cache(maxsize=1)

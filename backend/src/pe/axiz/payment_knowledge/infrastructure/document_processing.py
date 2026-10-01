@@ -9,6 +9,11 @@ from pe.axiz.payment_knowledge.config import Settings
 from pe.axiz.payment_knowledge.domain.models import DocumentChunk, ParsedDocument
 
 
+def canonical_markdown_name(document_id: str, source_name: str) -> str:
+    """Construye un nombre canónico Markdown sin duplicar la extensión del origen."""
+    return f"{document_id}__{Path(source_name).stem}.md"
+
+
 class GlmOcrAdapter:
     """Encapsula GLM-OCR para documentos escaneados o imágenes."""
 
