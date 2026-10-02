@@ -1,31 +1,12 @@
 # Adaptive RAG & GraphRAG para Payment Knowledge
 
-Esta PoC prueba una arquitectura de conocimiento documental para payment processing. El objetivo no es hacer otro chat con PDFs, sino comparar varias formas de recuperar información sobre el mismo corpus y poder ver por qué una estrategia funciona mejor que otra según el tipo de pregunta.
+Esta PoC prueba una arquitectura de conocimiento documental para payment processing. El objetivo es comparar varias formas de recuperar 
+información sobre el mismo corpus y poder ver por qué una estrategia funciona mejor que otra según el tipo de pregunta.
 
-La aplicación procesa documentos con Docling, usa GLM-OCR como ruta OCR cuando el contenido viene escaneado o la extracción normal no alcanza un mínimo de texto, construye una representación vectorial en Qdrant y un grafo de conocimiento en Memgraph, y expone cinco estrategias de recuperación: Native RAG, Hybrid RAG, RAGLight, GraphRAG y LightRAG. En modo `auto`, un router decide entre recuperación semántica, híbrida o GraphRAG según señales observables de la consulta. RAGLight corre en un servicio Python separado para aislar su árbol de dependencias del backend principal y poder mantener Docling y RAGLight en versiones actuales sin forzar paquetes incompatibles en el mismo entorno.
+La aplicación procesa documentos con Docling, usa GLM-OCR como ruta OCR cuando el contenido viene escaneado o la extracción normal 
+no alcanza un mínimo de texto, construye una representación vectorial en Qdrant y un grafo de conocimiento en Memgraph, y expone cinco estrategias de recuperación: Native RAG, Hybrid RAG, RAGLight, GraphRAG y LightRAG. En modo `auto`, un router decide entre recuperación semántica, híbrida o GraphRAG según señales observables de la consulta. RAGLight corre en un servicio Python separado para aislar su árbol de dependencias del backend principal y poder mantener Docling y RAGLight en versiones actuales sin forzar paquetes incompatibles en el mismo entorno.
 
-
-> Versión v13: corrige la atribución de fuentes en RAGLight y LightRAG para que Hit Rate/MRR midan documentos reales, elimina el `temperature` forzado en la síntesis OpenAI-compatible y hace que la exploración de vecindad de Memgraph tolere mayúsculas y acentos.
-
-> Versión v16: mantiene GLM-OCR sobre vLLM y agrega un perfil de baja VRAM para GTX 1650 de 4 GB: FP16, `TRITON_ATTN`, eager mode, `max-model-len=4096`, una secuencia concurrente, `gpu-memory-utilization=0.70` y `cpu-offload-gb=1`. Este perfil prioriza que el modelo pueda cargar; el offload aumenta la latencia por transferencias CPU↔GPU.
-
-> Versión v17: conserva el perfil v16 y agrega un modo de diagnóstico para la incompatibilidad CUDA observada en GTX 1650/SM75: `TORCH_SDPA` para el encoder multimodal, `video=0`, `--skip-mm-profiling`, `custom_ops=["none"]`, `CUDA_LAUNCH_BLOCKING=1` y logging `DEBUG`. El objetivo es identificar el kernel exacto de vLLM que falla sin confundirlo con errores CUDA reportados de forma asíncrona.
-
-> Versión v18: documenta cada variable de `.env.example`, agrega comentarios en Docker Compose con un perfil de referencia para GPUs con más VRAM y añade `infrastructure/scripts/smoke-test.sh` como prueba de aceptación funcional automatizada (health, vLLM/GLM-OCR, OCR real, Native RAG, Adaptive Routing/GraphRAG, Memgraph y RAGLight).
-
-> Versión v19: corrige el bloqueo del backend durante el bootstrap. `dataset-seed` ya no llama por HTTP a `POST /api/v1/datasets/seed`; ejecuta `IngestionService` directamente en su propio contenedor/proceso con acceso compartido a Qdrant, Memgraph, RAGLight, LightRAG y `.runtime`. El endpoint manual de seed también se ejecuta en un thread aislado con un `AppContainer` propio para no monopolizar el event loop de FastAPI. Además, Memgraph usa un timeout de conexión explícito en health.
-
-> Versión v20: corrige la ingesta OCR self-hosted que devolvía `422` antes de llegar a vLLM. El backend deja de cargar `PP-DocLayoutV3` para la ruta self-hosted y envía imágenes directamente a `/v1/chat/completions` con el prompt oficial `Text Recognition:`; los PDF se rasterizan por página con PyMuPDF y siguen la misma ruta.
-
-> Versión v21: eleva el contexto de GLM-OCR/vLLM a `8192` para soportar la muestra OCR real (el encoder visual genera ~4968 tokens de entrada) y desacopla el frontend de `dataset-seed`, de modo que `http://localhost:4200` queda disponible mientras el bootstrap continúa en segundo plano. El smoke test valida también la UI.
-
-> Versión v22: separa la prueba de OCR de la indexación pesada. El log real confirmó que GLM-OCR/vLLM sí completa la inferencia con HTTP 200; el timeout de 600 s ocurría después, dentro de la fase de indexación. `POST /documents/ingest` incorpora `index=false` para validar OCR+chunking sin persistir y `index_external=false` para indexar solo Qdrant/Memgraph. También agrega tiempos por etapa, timeout explícito para LightRAG, logging de progreso, corrige el mensaje del smoke test ante timeouts y vuelve vLLM a ejecución normal (`CUDA_LAUNCH_BLOCKING=0`, logging `INFO`).
-
-> Versión v23: agrega idempotencia documental real. El `document_id`/`idempotency_key` se deriva del SHA-256 del archivo; los IDs de chunk dependen solo de `document_id + position`; antes de reindexar se reemplazan todos los chunks previos del documento en Qdrant y el subgrafo correspondiente en Memgraph, incluido `CO_OCCURS`; el almacén canónico conserva un solo Markdown por `document_id`; y las cargas con `index_external=true` reconstruyen RAGLight/LightRAG desde el corpus canónico para evitar duplicados en esos motores. También se serializan cargas concurrentes del mismo contenido dentro del proceso, se expone `GET /api/v1/documents/{document_id}/index-state`, y el smoke test comprueba una reingesta repetida sin duplicar Qdrant, Memgraph ni el Markdown canónico.
-
-La interfaz está hecha en Angular tomando como base visual el proyecto de ejemplo: navegación a la izquierda, conversación al centro y configuración/evaluación a la derecha. La adapté para carga documental, selección de estrategia, evidencia recuperada, trazabilidad técnica, evaluación y exploración del grafo.
-
-## Qué quiero demostrar con esta PoC
+## Caso de uso
 
 El caso funcional está centrado en soporte técnico y operativo de pagos. El corpus de ejemplo incluye autorización ISO 8583, códigos de rechazo, conciliación, idempotencia, tokenización y controles PCI. Algunas preguntas se resuelven mejor por similitud semántica, otras necesitan conservar términos exactos como `05` o `ISO 8583`, y otras requieren relacionar conceptos como autorización, adquirente y conciliación.
 
@@ -58,8 +39,6 @@ Las versiones principales están fijadas para evitar cambios sorpresivos. Doclin
 | Qdrant Server | 1.18.3 |
 | qdrant-client backend | 1.19.1 |
 | qdrant-client RAGLight | 1.17.0 (dependencia fijada por RAGLight 3.4.7) |
-
-La versión de Qdrant no está elegida al azar. RAGLight 3.4.7 exige `qdrant-client==1.17.0` y el backend usa `qdrant-client==1.19.1`; Qdrant Server `1.18.3` es el punto común compatible porque la diferencia de versión menor es de uno en ambos casos. No se fuerza una versión de cliente distinta dentro de RAGLight.
 | Memgraph | 3.13.1 |
 | Neo4j Python Driver | 6.3.1, usado solo como cliente Bolt para Memgraph |
 | RAGLight | 3.4.7 |
@@ -129,9 +108,11 @@ flowchart LR
     EV --> LRF
 ```
 
-Qdrant y Memgraph son los únicos componentes persistentes de infraestructura. Docker Compose también levanta el backend, el servicio aislado de RAGLight, el frontend y un contenedor de bootstrap que carga el dataset de ejemplo y termina cuando la ingesta concluye. No agregué PostgreSQL, Kafka, MongoDB, KurrentDB, InfluxDB ni Drools porque no aportan a la prueba técnica.
+Qdrant y Memgraph son los únicos componentes persistentes de infraestructura. Docker Compose también levanta el backend, el servicio 
+aislado de RAGLight, el frontend y un contenedor de bootstrap que carga el dataset de ejemplo y termina cuando la ingesta concluye. No agregué PostgreSQL, Kafka, MongoDB, KurrentDB, InfluxDB ni Drools porque no aportan a la prueba técnica.
 
-El servicio RAGLight no agrega una nueva base ni duplica infraestructura. Sigue usando Qdrant, pero tiene su propio runtime Python. Esa separación existe por compatibilidad de dependencias y también deja claro el límite entre el framework RAGLight y el backend de la PoC.
+El servicio RAGLight no agrega una nueva base ni duplica infraestructura. Sigue usando Qdrant, pero tiene su propio runtime Python. 
+Esa separación existe por compatibilidad de dependencias y también deja claro el límite entre el framework RAGLight y el backend de la PoC.
 
 ## Cómo funciona la ingesta
 
@@ -228,11 +209,14 @@ Si el endpoint local requiere un token aunque no lo valide, se puede colocar un 
 
 ## GLM-OCR
 
-La PoC usa GLM-OCR **self-hosted por defecto**. No necesito saldo ni `ZHIPU_API_KEY`: Docker Compose levanta un servicio `glm-ocr` basado en vLLM y el modelo `zai-org/GLM-OCR`. Desde v20, el backend llama directamente al endpoint OpenAI-compatible de vLLM para imágenes y rasteriza PDF por página antes de enviarlos al modelo. Esto evita cargar localmente `PP-DocLayoutV3` dentro del backend, que en la combinación `glmocr[selfhosted]` + Transformers 5.3 podía fallar al materializar pesos desde meta tensors antes de llegar siquiera a vLLM. El SDK `glmocr==0.1.5` se conserva para MaaS/compatibilidad, mientras Docling sigue siendo el parser principal de documentos en política `auto`.
+La PoC usa GLM-OCR **self-hosted por defecto**. No es necesario `ZHIPU_API_KEY`: Docker Compose levanta un servicio `glm-ocr` basado en vLLM 
+y el modelo `zai-org/GLM-OCR`. Desde v20, el backend llama directamente al endpoint OpenAI-compatible de vLLM para imágenes y rasteriza PDF por página antes de enviarlos al modelo. Esto evita cargar localmente `PP-DocLayoutV3` dentro del backend, que en la combinación `glmocr[selfhosted]` + Transformers 5.3 podía fallar al materializar pesos desde meta tensors antes de llegar siquiera a vLLM. El SDK `glmocr==0.1.5` se conserva para MaaS/compatibilidad, mientras Docling sigue siendo el parser principal de documentos en política `auto`.
 
 Configuración usada dentro de Docker:
 
-La llamada directa a vLLM usa el prompt oficial de document parsing `Text Recognition:` y envía la imagen como `data:image/...;base64` a `/v1/chat/completions`. El modelo oficial documenta ese endpoint OpenAI-compatible para vLLM y limita los prompts de document parsing a `Text Recognition:`, `Formula Recognition:` y `Table Recognition:`.
+La llamada directa a vLLM usa el prompt oficial de document parsing `Text Recognition:` y envía la imagen 
+como `data:image/...;base64` a `/v1/chat/completions`. El modelo oficial documenta ese endpoint OpenAI-compatible para vLLM y limita los 
+prompts de document parsing a `Text Recognition:`, `Formula Recognition:` y `Table Recognition:`.
 
 ```env
 GLM_OCR_MODE=selfhosted
@@ -261,7 +245,8 @@ curl -X POST "http://localhost:8000/api/v1/documents/ingest?ocr=glm&index=false"
   -F "file=@datasets/ocr_samples/documento_escaneado_prueba_ocr_pagos.pdf"
 ```
 
-El contenedor usa la imagen oficial de vLLM `v0.19.0-ubuntu2404` y fija `transformers==5.3.0`. La imagen de vLLM expone el intérprete como `python3`, por lo que `Dockerfile.glm-ocr` instala y valida Transformers con `python3 -m pip`; no depende del alias `python`. Para la GTX 1650 de 4 GB uso un perfil conservador: `dtype=half`, `TRITON_ATTN`, `--enforce-eager`, `max-num-seqs=1`, contexto `8192`, `gpu-memory-utilization=0.70` y `cpu-offload-gb=1`. El último parámetro mantiene hasta 1 GiB de pesos en RAM y los transfiere durante el forward pass; reduce presión de VRAM a cambio de mayor latencia. `CUDA_LAUNCH_BLOCKING` vuelve a `0` y vLLM a logging `INFO` en ejecución normal; el modo síncrono/debug queda solo para diagnóstico.
+El contenedor usa la imagen oficial de vLLM `v0.19.0-ubuntu2404` y fija `transformers==5.3.0`. La imagen de vLLM expone el 
+intérprete como `python3`, por lo que `Dockerfile.glm-ocr` instala y valida Transformers con `python3 -m pip`; no depende del alias `python`. Para la GTX 1650 de 4 GB uso un perfil conservador: `dtype=half`, `TRITON_ATTN`, `--enforce-eager`, `max-num-seqs=1`, contexto `8192`, `gpu-memory-utilization=0.70` y `cpu-offload-gb=1`. El último parámetro mantiene hasta 1 GiB de pesos en RAM y los transfiere durante el forward pass; reduce presión de VRAM a cambio de mayor latencia. `CUDA_LAUNCH_BLOCKING` vuelve a `0` y vLLM a logging `INFO` en ejecución normal; el modo síncrono/debug queda solo para diagnóstico.
 
 ## Estructura del proyecto
 
@@ -307,8 +292,6 @@ El contenedor usa la imagen oficial de vLLM `v0.19.0-ubuntu2404` y fija `transfo
 ├── pyproject.toml           dependencias del backend principal
 └── README.md
 ```
-
-Toda la explicación del proyecto está en este README. No hay documentación duplicada en otras carpetas.
 
 ## Código principal
 
@@ -357,47 +340,6 @@ El servicio RAGLight expone cinco endpoints internos. El frontend no los consume
 | `POST http://raglight-service:8010/index` | indexar un directorio de documentos canónicos compartido por volumen y verificar que se creen puntos |
 | `POST http://raglight-service:8010/search` | ejecutar retrieval híbrido RAGLight y devolver evidencia al backend |
 
-## Variables del `.env` en Docker
-
-El archivo `.env` está en la raíz del proyecto, mientras que el Compose vive en `infrastructure/`. Como se ejecuta con `-f infrastructure/docker-compose.yml`, Docker Compose considera `infrastructure/` como directorio del proyecto para la interpolación automática. Para evitar que un `HF_TOKEN`, `OPENAI_API_KEY` u otra variable del `.env` raíz quede fuera de los contenedores, esta versión declara `env_file: ../.env` explícitamente en `backend`, `raglight-service` y `glm-ocr`.
-
-Las URLs que cambian dentro de Docker (`QDRANT_URL`, `MEMGRAPH_URI`, `RAGLIGHT_SERVICE_URL`, `LIGHTRAG_WORKDIR` y `DATASETS_DIR`) se sobrescriben después con valores internos de la red Compose. Las credenciales y switches del `.env` no se pisan con valores vacíos.
-
-Además, backend, RAGLight y GLM-OCR comparten un volumen de cache de Hugging Face y usan `HF_HOME`, `HUGGINGFACE_HUB_CACHE` y `SENTENCE_TRANSFORMERS_HOME`. El token nunca se imprime; los endpoints de salud solo muestran `hf_token_configured=true/false`.
-
-Para confirmar que el token llegó al contenedor sin mostrarlo:
-
-```bash
-docker compose -f infrastructure/docker-compose.yml exec backend python -c 'import os; print(bool(os.getenv("HF_TOKEN")))'
-docker compose -f infrastructure/docker-compose.yml exec raglight-service python -c 'import os; print(bool(os.getenv("HF_TOKEN")))'
-```
-
-También se puede consultar:
-
-```bash
-curl -s http://localhost:8000/api/v1/health | python -m json.tool
-curl -s http://localhost:8010/health | python -m json.tool
-```
-
-RAGLight incorpora además `GET /ready`: inicializa el modelo de embeddings y Qdrant antes de procesar el dataset. Si falla una descarga, autenticación o inicialización, el bootstrap termina temprano con el error real en vez de esperar hasta `/index`. Los errores HTTP del servicio conservan ahora el `detail` original y el servicio registra el traceback completo. El endpoint `GET /health` también informa las versiones efectivas de RAGLight, LangGraph, `langgraph-prebuilt`, checkpoint, SDK y qdrant-client para que una incompatibilidad transitiva sea visible sin entrar al contenedor.
-
-
-## Requisitos
-
-Hay dos formas de ejecutar la PoC. La recomendada es Docker porque deja listo el stack completo y también precarga el dataset. Conda queda como alternativa para desarrollo local.
-
-Para Docker necesito:
-
-- Docker Engine o Docker Desktop con Compose v2;
-- una GPU NVIDIA visible desde Docker (`nvidia-smi` en WSL/Linux y soporte `--gpus all`);
-- la configuración incluida intenta ejecutar GLM-OCR/vLLM en una GTX 1650 de 4 GB mediante 1 GiB de CPU offload; 8 GB o más siguen siendo una referencia mucho más cómoda si quiero evitar offload;
-- 16 GB de RAM del sistema como mínimo razonable y 32 GB recomendados para ejecutar todo el stack con margen.
-
-El primer arranque descarga los pesos de GLM-OCR desde Hugging Face y puede tardar varios minutos. Los pesos y la caché de compilación de vLLM quedan persistidos en volúmenes Docker.
-
-Para desarrollo local necesito además una distribución Conda, por ejemplo Miniconda o Miniforge. No uso `venv` y no hay pasos manuales de `pip install`. Python y Node salen del entorno Conda.
-
-GLM-OCR local no necesita ninguna credencial de Zhipu. Las credenciales externas solo hacen falta para LightRAG y para síntesis generativa cuando uso el adapter OpenAI-compatible.
 
 ## Ejecución recomendada: todo con Docker
 
@@ -432,59 +374,6 @@ Ese único comando hace el bootstrap completo:
 10. el frontend Angular ya está levantado en paralelo; cuando el seed termina correctamente, el corpus queda listo para las pruebas RAG completas.
 
 No hay que ejecutar inserts ni scripts de carga después. `dataset-seed` termina con código `0` cuando la precarga finaliza; eso es esperado. El límite de 900 segundos aplica únicamente a la espera inicial de Qdrant/Memgraph/RAGLight. El procesamiento posterior puede durar más si LightRAG está habilitado, pero ya no consume el único event loop del backend. Si una ruta obligatoria habilitada falla, `dataset-seed` termina distinto de cero; el frontend seguirá disponible para diagnóstico, pero las pruebas RAG que dependen del corpus no deben considerarse válidas.
-
-### Compatibilidad LangGraph dentro de RAGLight
-
-Si aparece `ImportError: cannot import name 'ExecutionInfo' from 'langgraph.runtime'`, no es un problema de `HF_TOKEN`: significa que `langgraph-prebuilt` quedó más nuevo que el `langgraph` compatible con RAGLight. Esta versión fija el conjunto probado y además valida el import durante el build. Si esa validación falla, Docker debe detenerse en la construcción de `raglight-service` en vez de arrancar un contenedor roto.
-
-Para comprobar las versiones en ejecución:
-
-```bash
-curl -s http://localhost:8010/health | python -m json.tool
-```
-
-Debe mostrar, entre otros valores, `raglight=3.4.7`, `langgraph=1.0.5` y `langgraph-prebuilt=1.0.5`.
-
-### Por qué backend y RAGLight se construyen por separado
-
-El error `ResolutionImpossible` que aparece al intentar instalar todo junto no se resuelve forzando pip. Docling 2.130.0 depende de un rango de Typer que empieza en 0.19, mientras RAGLight 3.4.7 fija Typer 0.16.0. Por eso el Compose usa dos imágenes Python distintas. El backend no instala `raglight`; `raglight-service` no instala Docling. Los dos comparten Qdrant y el volumen `.runtime`.
-
-`dataset-seed` declara el mismo `image` y el mismo `build` que `backend` mediante un ancla YAML. Así Compose sabe construir la imagen local y no necesita buscar `axiz-adaptive-rag-backend:local` en Docker Hub. No hace falta `docker login`.
-
-Dentro de Docker no uso Conda ni Micromamba. Los servicios Python parten de `python:3.12-slim-bookworm` y se instalan directamente con `python -m pip install .`. El frontend se construye con `node:22-bookworm-slim` y luego se sirve desde Nginx. Conda queda reservado para desarrollo local desde el IDE.
-
-Servicios expuestos:
-
-| Servicio | URL / puerto | Uso |
-| --- | --- | --- |
-| Frontend | `http://localhost:4200` | interfaz Angular |
-| API | `http://localhost:8000` | FastAPI principal |
-| RAGLight service | `http://localhost:8010` | API interna de retrieval RAGLight; expuesta para diagnóstico local |
-| Swagger | `http://localhost:8000/docs` | prueba de endpoints |
-| Qdrant HTTP | `localhost:6333` | vectores y colecciones |
-| Qdrant gRPC | `localhost:6334` | interfaz gRPC |
-| Memgraph Bolt | `localhost:7687` | acceso al grafo |
-| Memgraph | `localhost:7444` | puerto expuesto por Memgraph |
-
-Para revisar el estado en otra terminal:
-
-```bash
-docker compose -f infrastructure/docker-compose.yml ps
-```
-
-Para detener el stack se usa `Ctrl+C`. Si luego quiero remover los contenedores sin borrar los datos:
-
-```bash
-docker compose -f infrastructure/docker-compose.yml down
-```
-
-Para resetear completamente la PoC, incluidas las colecciones, el grafo y el runtime de LightRAG:
-
-```bash
-docker compose -f infrastructure/docker-compose.yml down -v
-```
-
-No configuré health checks periódicos en Compose. El bootstrap usa reintentos finitos solo hasta que el dataset logra cargarse, así que no hay llamadas de health ejecutándose permanentemente ni ensuciando los logs.
 
 ### Configuración del `.env` y credenciales
 
@@ -528,51 +417,6 @@ Para Docker, Compose usa las variables del `.env` ubicado en la raíz. Las direc
 Docling no requiere API key. RAGLight tampoco requiere API key en esta PoC porque usa embeddings públicos/Hugging Face y Qdrant local. `HF_TOKEN` es opcional: sin él la descarga funciona de forma anónima, pero Hugging Face puede mostrar un warning y aplicar límites más bajos. Qdrant y Memgraph tampoco necesitan tokens con la configuración del Compose.
 
 GLM-OCR está incorporado al Compose y no usa `ZHIPU_API_KEY`. `HF_TOKEN` sigue siendo opcional, aunque ayuda a evitar límites anónimos al descargar los pesos desde Hugging Face.
-
-### Ejemplo mínimo
-
-```env
-LLM_PROVIDER=extractive
-RAGLIGHT_ENABLED=true
-LIGHTRAG_ENABLED=true
-GLM_OCR_MODE=selfhosted
-GLM_OCR_API_URL=http://localhost:8080/v1/chat/completions
-GLM_OCR_MODEL=glm-ocr
-GLM_OCR_LAYOUT_DEVICE=cpu
-GLM_OCR_MAX_WORKERS=1
-GLM_OCR_REQUEST_TIMEOUT_SECONDS=600
-GLM_OCR_MAX_TOKENS=2048
-OCR_POLICY=auto
-ZHIPU_API_KEY=
-OPENAI_API_KEY=
-```
-
-Con esta configuración el OCR funciona localmente. LightRAG queda inactivo si no configuro el proveedor OpenAI-compatible; Native RAG, Hybrid RAG, RAGLight, GraphRAG, Adaptive Routing, Docling y GLM-OCR siguen disponibles.
-
-### Ejemplo con generación y LightRAG habilitados
-
-```env
-LLM_PROVIDER=openai
-OPENAI_API_KEY=sk-ejemplo-reemplazar
-OPENAI_BASE_URL=https://api.openai.com/v1
-OPENAI_MODEL=gpt-5-mini
-OPENAI_EMBEDDING_MODEL=text-embedding-3-small
-OPENAI_EMBEDDING_DIMENSION=1536
-
-GLM_OCR_MODE=selfhosted
-GLM_OCR_API_URL=http://localhost:8080/v1/chat/completions
-GLM_OCR_MODEL=glm-ocr
-GLM_OCR_LAYOUT_DEVICE=cpu
-GLM_OCR_MAX_WORKERS=1
-GLM_OCR_REQUEST_TIMEOUT_SECONDS=600
-GLM_OCR_MAX_TOKENS=2048
-OCR_POLICY=auto
-
-RAGLIGHT_ENABLED=true
-LIGHTRAG_ENABLED=true
-```
-
-Los valores `sk-ejemplo-reemplazar` son placeholders y no se deben commitear.
 
 ## Ejecución local con Conda
 
@@ -703,7 +547,7 @@ documento
   -> LightRAG cuando está configurado
 ```
 
-La idempotencia no depende solo de `MERGE`. En v23 Qdrant aplica reemplazo por `document_id`, Memgraph elimina el subgrafo anterior del documento antes de reconstruirlo y el archivo canónico se reemplaza por clave de contenido. RAGLight y LightRAG pueden generar IDs internos propios, por eso una carga con `index_external=true` reconstruye esos motores a partir del corpus canónico completo. Este enfoque es intencional para la escala de la PoC: privilegia consistencia reproducible y evita acumulación de evidencia duplicada. RAGLight 3.4.7 fija `qdrant-client==1.17.0`, mientras que el backend principal usa `qdrant-client==1.19.1`. Por eso Qdrant Server se fija en `1.18.3`: es la versión más reciente de la rama 1.18 y queda a una versión menor de ambos clientes, evitando el conflicto del resolver y la advertencia de compatibilidad en runtime.
+La idempotencia no depende solo de `MERGE`. En v24 Qdrant aplica reemplazo por `document_id`, Memgraph elimina el subgrafo anterior del documento antes de reconstruirlo y el archivo canónico se reemplaza por clave de contenido. RAGLight y LightRAG pueden generar IDs internos propios, por eso una carga con `index_external=true` reconstruye esos motores a partir del corpus canónico completo. Este enfoque es intencional para la escala de la PoC: privilegia consistencia reproducible y evita acumulación de evidencia duplicada. RAGLight 3.4.7 fija `qdrant-client==1.17.0`, mientras que el backend principal usa `qdrant-client==1.19.1`. Por eso Qdrant Server se fija en `1.18.3`: es la versión más reciente de la rama 1.18 y queda a una versión menor de ambos clientes, evitando el conflicto del resolver y la advertencia de compatibilidad en runtime.
 
 ## Prueba de aceptación: cómo demostrar que la PoC funciona
 
@@ -1010,113 +854,3 @@ Frontend:
 ```bash
 conda run -n axiz-adaptive-rag-payments npm --prefix frontend run build
 ```
-
-## Estado de validación de esta entrega
-
-Antes de empaquetar v23 validé en este entorno:
-
-- `compileall` del backend, dataset y servicio RAGLight;
-- `35 passed` en `backend/tests`, incluyendo chunk IDs estables, reingesta del mismo documento sin crecimiento del índice, un solo Markdown canónico para el mismo contenido y el endpoint de estado idempotente a nivel de servicio;
-- `8 passed` en `raglight_service/tests`;
-- parseo YAML del Compose;
-- sintaxis Bash de `infrastructure/scripts/smoke-test.sh`, incluyendo la nueva prueba de reingesta idempotente;
-- wheel del backend `0.1.12`;
-- wheel de RAGLight `0.2.3`;
-- perfil GTX 1650 con `cpu-offload-gb=1`, `skip-mm-profiling`, `custom_ops=["none"]`, `CUDA_LAUNCH_BLOCKING=0`, logging `INFO` y `max-model-len=8192`;
-- que el frontend depende solo del backend y muestra si una carga reemplazó una versión previa.
-
-La ejecución física compartida por el usuario sobre v22 ya había cerrado la validación end-to-end con `RUN_EVALUATION=true`: 11 comprobaciones OK, 0 advertencias, incluyendo OCR real, Native RAG, Adaptive Routing/GraphRAG, Memgraph, RAGLight y evaluación. En este entorno no afirmo una nueva validación física Docker/NVIDIA de v23. Tampoco recompilé Angular porque `frontend/node_modules` no está presente y no se restauraron dependencias; el cambio de TypeScript es pequeño y queda cubierto por revisión estática. La prueba reproducible para validar específicamente la idempotencia de v23 en la máquina destino es `RUN_EVALUATION=true bash infrastructure/scripts/smoke-test.sh`.
-
-## Decisiones de alcance
-
-- Qdrant y Memgraph son los únicos stores de infraestructura. GLM-OCR y RAGLight son servicios de aplicación especializados que se ejecutan en contenedores separados por compatibilidad y aislamiento.
-- RAGLight reutiliza Qdrant pero corre en un servicio Python separado y usa una colección distinta para que la comparación no mezcle índices ni árboles de dependencias.
-- GraphRAG es una implementación propia sobre Memgraph y Hybrid RAG; LightRAG se mantiene como flujo alterno para comparación.
-- La generación se desacopla del retrieval. Esto permite medir retrieval sin que una respuesta de LLM cambie el resultado de Hit Rate o MRR.
-- El modo `auto` no selecciona RAGLight/LightRAG para evitar que el comportamiento base dependa de frameworks o credenciales externas. Esos motores se pueden forzar desde API/UI y se incluyen en evaluación.
-- No se agregó un broker, una base relacional o una base documental porque no hay un requisito del caso que lo justifique.
-- GLM-OCR usa un contenedor vLLM dedicado con GPU y persistencia de caché; en selfhosted el backend llama al modelo directamente y no carga PP-DocLayoutV3. Docling conserva el procesamiento estructural principal en política `auto`.
-
-## Optimización del build Docker para dependencias de IA
-
-Docling, el pipeline self-hosted de GLM-OCR y RAGLight terminan usando PyTorch. Si se deja que `pip` resuelva PyTorch desde el índice general de PyPI en Linux, puede descargar además paquetes CUDA/NVIDIA de varios gigabytes aunque esta PoC se ejecute en CPU. Eso hace que el primer `docker compose up --build` tarde demasiado.
-
-Backend y RAGLight se construyen desde `infrastructure/Dockerfile.ai` con una etapa CPU compartida que instala explícitamente PyTorch CPU. GLM-OCR usa `infrastructure/Dockerfile.glm-ocr`, basado en la imagen oficial GPU de vLLM, y se mantiene separado para no contaminar el backend con CUDA. BuildKit mantiene caché de `pip`, y Docker reutiliza las capas de la imagen vLLM ya descargadas; por eso, después de una descarga inicial completa, una corrección en la capa final de `Dockerfile.glm-ocr` no debería volver a descargar los varios GB de la imagen base salvo que se haya limpiado la caché local.
-
-No se usa Conda dentro de Docker. Conda queda únicamente para trabajar localmente desde el IDE.
-
-El primer build seguirá siendo más pesado que un servicio web normal porque Docling, Transformers y Sentence Transformers son dependencias de IA, pero no debería descargar el stack CUDA completo dos veces.
-
-Para ver el detalle de lo que Docker está descargando o instalando:
-
-```bash
-BUILDKIT_PROGRESS=plain docker compose -f infrastructure/docker-compose.yml build backend raglight-service glm-ocr
-```
-
-Después se levanta todo normalmente:
-
-```bash
-docker compose -f infrastructure/docker-compose.yml up --build
-```
-
-
-
-### Error `python: not found` al construir GLM-OCR
-
-La imagen `vllm/vllm-openai:v0.19.0-ubuntu2404` no garantiza el alias `python`; el intérprete disponible es `python3`. Si aparece:
-
-```text
-/bin/sh: 1: python: not found
-```
-
-la v15 y versiones posteriores lo corrigen usando:
-
-```dockerfile
-RUN python3 -m pip install --upgrade "transformers==5.3.0"
-```
-
-Además, la misma capa hace un import de `transformers` y `vllm` y muestra sus versiones durante el build. Si la imagen base ya terminó de descargarse en un intento anterior, Docker debería reutilizarla.
-
-### GLM-OCR en GTX 1650 de 4 GB y CPU offload
-
-El perfil Docker de esta versión está ajustado para probar GLM-OCR en una GTX 1650 de 4 GB. vLLM usa `--cpu-offload-gb 1`, por lo que hasta 1 GiB de pesos puede permanecer en RAM y accederse mediante UVA durante la inferencia. Esto puede permitir que el modelo cargue donde el perfil sin offload se queda sin margen, pero la inferencia será más lenta porque parte de los pesos cruza CPU↔GPU en cada forward pass.
-
-Los parámetros relevantes del servicio `glm-ocr` son:
-
-```text
-dtype=half
-attention-backend=TRITON_ATTN
-mm-encoder-attn-backend=TORCH_SDPA
-enforce-eager=true
-max-num-seqs=1
-max-model-len=8192
-gpu-memory-utilization=0.70
-cpu-offload-gb=1
-limit-mm-per-prompt={"image":1,"video":0}
-skip-mm-profiling=true
-custom_ops=["none"]
-CUDA_LAUNCH_BLOCKING=0
-VLLM_LOGGING_LEVEL=INFO
-```
-
-En v22 el perfil deja el modo diagnóstico permanente: la inferencia real ya llegó a `POST /v1/chat/completions` y terminó con HTTP 200 en la GTX 1650. Mantengo `custom_ops=["none"]`, eager mode, offload y los backends compatibles con SM75 porque son los ajustes que hicieron estable el arranque, pero `CUDA_LAUNCH_BLOCKING=0` y logging `INFO` recuperan rendimiento y evitan miles de líneas por token. Si reaparece un error CUDA difícil de localizar, puedo cambiar temporalmente `CUDA_LAUNCH_BLOCKING=1` y `VLLM_LOGGING_LEVEL=DEBUG` desde `.env`, reproducirlo y luego volver a los valores normales.
-
-Para probar solo GLM-OCR sin reconstruir el resto del stack:
-
-```bash
-docker compose -f infrastructure/docker-compose.yml stop glm-ocr
-docker compose -f infrastructure/docker-compose.yml up --no-deps --force-recreate glm-ocr
-docker compose -f infrastructure/docker-compose.yml logs -f glm-ocr
-```
-
-Cuando el servidor quede listo, `curl http://localhost:8080/v1/models` debe responder con el modelo `glm-ocr`. Si todavía falla por KV cache, el siguiente ajuste a probar es reducir más `max-model-len`; si falla durante la carga de pesos aun con offload, una GPU de 4 GB puede ser insuficiente para este runtime aunque el modelo base sea de 0.9B.
-
-### Compatibilidad Qdrant y RAGLight
-
-No se debe agregar manualmente `qdrant-client==1.19.1` al servicio RAGLight. RAGLight 3.4.7 declara `qdrant-client==1.17.0` en su extra `qdrant`; forzarlo a 1.19.1 hace que `pip` termine con `ResolutionImpossible`. La PoC usa Qdrant Server 1.18.3 para mantener compatibilidad simultánea con el cliente 1.17.0 de RAGLight y el 1.19.1 del backend principal.
-
-
-
-### Cambio v20: OCR self-hosted directo a vLLM
-
-En v19 el smoke test podía devolver `422` antes de que vLLM recibiera una inferencia. El log mostraba que el backend inicializaba `PPDocLayoutV3ForObjectDetection` y fallaba con `Cannot copy out of meta tensor`. v20 elimina ese punto de fallo en selfhosted: imágenes se envían directamente a `glm-ocr:8080/v1/chat/completions`; para PDF se rasteriza cada página con PyMuPDF y se aplica el mismo OCR. El smoke test ahora imprime el cuerpo JSON de cualquier error OCR para que el diagnóstico no se reduzca a un `curl (22)`.

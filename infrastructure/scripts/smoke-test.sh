@@ -13,6 +13,7 @@ OCR_SAMPLE="${OCR_SAMPLE:-$ROOT_DIR/datasets/ocr_samples/documento_escaneado_pru
 RUN_EVALUATION="${RUN_EVALUATION:-false}"
 SEED_CONTAINER="${SEED_CONTAINER:-axiz-rag-dataset-seed}"
 SEED_WAIT_SECONDS="${SEED_WAIT_SECONDS:-1200}"
+OCR_TIMEOUT_SECONDS="${OCR_TIMEOUT_SECONDS:-600}"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
@@ -90,20 +91,20 @@ else
   warn "LightRAG no está disponible; es esperado si no se configuró proveedor OpenAI-compatible"
 fi
 
-# 3) OCR real: fuerza GLM-OCR e indexa solo Qdrant/Memgraph.
-# Esto valida OCR real y, al usar reemplazo documental, limpia duplicados históricos del sample
-# sin quedar bloqueado por RAGLight/LightRAG.
+# 3) OCR real: fuerza GLM-OCR sin indexar.
+# La prueba OCR se aísla deliberadamente de Qdrant/Memgraph/RAGLight/LightRAG para que
+# una GPU lenta no mezcle la latencia de inferencia con la validación de idempotencia.
 OCR_STARTED="$(date +%s)"
 set +e
-OCR_HTTP_CODE="$(curl -sS --max-time 180 \
+OCR_HTTP_CODE="$(curl -sS --max-time "$OCR_TIMEOUT_SECONDS" \
   -o "$TMP_DIR/ocr.json" -w "%{http_code}" \
-  -X POST "$API_URL/api/v1/documents/ingest?ocr=glm&index_external=false" \
+  -X POST "$API_URL/api/v1/documents/ingest?ocr=glm&index=false" \
   -F "file=@$OCR_SAMPLE")"
 OCR_CURL_RC=$?
 set -e
 OCR_ELAPSED=$(( $(date +%s) - OCR_STARTED ))
 if [[ "$OCR_CURL_RC" -eq 28 ]]; then
-  fail "GLM-OCR excedió 180s en la prueba OCR (transcurridos: ${OCR_ELAPSED}s)"
+  fail "GLM-OCR excedió ${OCR_TIMEOUT_SECONDS}s en la prueba OCR (transcurridos: ${OCR_ELAPSED}s)"
 elif [[ "$OCR_CURL_RC" -ne 0 ]]; then
   fail "La prueba OCR no pudo completar la llamada al backend (curl rc=$OCR_CURL_RC)"
 fi
@@ -118,12 +119,12 @@ import json, sys
 p = json.load(open(sys.argv[1], encoding="utf-8"))
 assert p.get("processor") == "glm-ocr", p
 assert p.get("ocr_used") is True, p
-assert p.get("indexed") is True, p
+assert p.get("indexed") is False, p
 assert p.get("idempotency_key") == p.get("document_id"), p
 assert int(p.get("chunks", 0)) > 0, p
 assert float((p.get("timings_ms") or {}).get("parse_ocr", 0)) > 0, p
 PY
-ok "GLM-OCR procesó una imagen real en ${OCR_ELAPSED}s e indexó sin duplicar motores externos"
+ok "GLM-OCR procesó una imagen real en ${OCR_ELAPSED}s (prueba aislada, sin indexación)"
 
 # 4) Antes de probar recuperación, el dataset base debe haber terminado de indexarse.
 # La UI y el backend pueden usarse durante el bootstrap; las pruebas RAG requieren el corpus listo.
