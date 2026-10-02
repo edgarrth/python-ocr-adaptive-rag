@@ -1,0 +1,9 @@
+{
+  "document_id": "<sha256-24>",
+  "expected_chunks": 2,
+  "qdrant_chunks": 2,
+  "memgraph_chunks": 2,
+  "canonical_files": 1,
+  "canonical_sources": ["<sha256-24>__documento_escaneado_prueba_ocr_pagos.md"],
+  "consistent": true
+}

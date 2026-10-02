@@ -45,23 +45,21 @@ services:
       HF_HOME: /root/.cache/huggingface
       HUGGINGFACE_HUB_CACHE: /root/.cache/huggingface/hub
 
-      # PERFIL ACTUAL: GTX 1650 / 4 GB / SM75, todavía en modo diagnóstico.
-      # CUDA_LAUNCH_BLOCKING=1 hace síncronos los errores CUDA y reduce rendimiento.
-      # GPU mejor (8 GB+ y runtime ya validado): eliminar esta variable o usar "0".
-      CUDA_LAUNCH_BLOCKING: "1"
+      # Ejecución normal: CUDA asíncrono. Para diagnosticar un error CUDA concreto,
+      # cambiar temporalmente a "1" y volver luego a "0" porque penaliza rendimiento.
+      CUDA_LAUNCH_BLOCKING: "${CUDA_LAUNCH_BLOCKING:-0}"
 
-      # DEBUG ayuda a diagnosticar la compatibilidad de la GTX 1650.
-      # GPU mejor / ejecución normal: cambiar a INFO.
-      VLLM_LOGGING_LEVEL: DEBUG
+      # INFO evita el volumen de trazas por token. Usar DEBUG solo para diagnóstico.
+      VLLM_LOGGING_LEVEL: "${VLLM_LOGGING_LEVEL:-INFO}"
 
     # ------------------------------------------------------------------------
     # Perfil GPU de GLM-OCR / vLLM
     # ------------------------------------------------------------------------
     # Valores actuales: conservadores para GTX 1650 de 4 GB.
+    # El OCR real ya fue confirmado ejecutando inferencia; por eso el perfil
+    # normal usa CUDA_LAUNCH_BLOCKING=0 y logging INFO.
     #
     # Punto de partida sugerido para una GPU mejor (por ejemplo >= 8 GB VRAM):
-    #   - CUDA_LAUNCH_BLOCKING: quitar o poner "0"
-    #   - VLLM_LOGGING_LEVEL: INFO
     #   - --cpu-offload-gb: 0
     #   - --gpu-memory-utilization: 0.85
     #   - --max-model-len: 16384
@@ -199,6 +197,7 @@ services:
       MEMGRAPH_URI: bolt://memgraph:7687
       RAGLIGHT_SERVICE_URL: http://raglight-service:8010
       LIGHTRAG_WORKDIR: /app/.runtime/lightrag
+      LIGHTRAG_TIMEOUT_SECONDS: "${LIGHTRAG_TIMEOUT_SECONDS:-300}"
       DATASETS_DIR: /app/datasets/sample_documents
       HF_HOME: /app/.cache/huggingface
       HUGGINGFACE_HUB_CACHE: /app/.cache/huggingface/hub
@@ -242,6 +241,7 @@ services:
       MEMGRAPH_URI: bolt://memgraph:7687
       RAGLIGHT_SERVICE_URL: http://raglight-service:8010
       LIGHTRAG_WORKDIR: /app/.runtime/lightrag
+      LIGHTRAG_TIMEOUT_SECONDS: "${LIGHTRAG_TIMEOUT_SECONDS:-300}"
       DATASETS_DIR: /app/datasets/sample_documents
       HF_HOME: /app/.cache/huggingface
       HUGGINGFACE_HUB_CACHE: /app/.cache/huggingface/hub

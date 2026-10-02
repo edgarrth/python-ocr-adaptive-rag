@@ -3,8 +3,22 @@
   "source": "documento_escaneado_prueba_ocr_pagos.pdf",
   "processor": "glm-ocr",
   "chunks": 2,
-  "entities": 1,
+  "entities": 19,
   "ocr_used": true,
+  "indexed": true,
   "raglight_indexed": true,
-  "lightrag_indexed": true
+  "lightrag_indexed": true,
+  "idempotency_key": "<sha256-24>",
+  "replaced_existing": false,
+  "timings_ms": {
+    "parse_ocr": 0,
+    "chunking": 0,
+    "idempotency_lookup": 0,
+    "qdrant": 0,
+    "memgraph": 0,
+    "canonical": 0,
+    "raglight": 0,
+    "lightrag": 0,
+    "total": 0
+  }
 }

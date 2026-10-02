@@ -286,7 +286,7 @@ class SemanticChunker:
 
         result: list[DocumentChunk] = []
         for index, text in enumerate(chunks):
-            chunk_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"pe.axiz:{document.document_id}:{index}:{text}"))
+            chunk_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"pe.axiz:{document.document_id}:{index}"))
             result.append(
                 DocumentChunk(
                     id=chunk_id,

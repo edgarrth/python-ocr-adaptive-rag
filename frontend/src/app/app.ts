@@ -22,6 +22,17 @@ interface QueryResponse {
   timings_ms: Record<string, number>;
 }
 
+
+interface IngestResponse {
+  document_id: string;
+  source: string;
+  processor: string;
+  chunks: number;
+  indexed: boolean;
+  idempotency_key: string;
+  replaced_existing: boolean;
+}
+
 interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
@@ -173,10 +184,17 @@ export class AppComponent {
     const form = new FormData();
     form.append('file', file);
     this.loading.set(true);
-    this.http.post(`${this.apiBase}/documents/ingest`, form).subscribe({
-      next: (result: any) => {
+    // La carga interactiva prioriza respuesta rápida: Qdrant + Memgraph.
+    // RAGLight/LightRAG se mantienen en el bootstrap y pueden activarse manualmente
+    // con index_external=true en la API cuando se quiera reindexación completa.
+    this.http.post<IngestResponse>(`${this.apiBase}/documents/ingest?index_external=false`, form).subscribe({
+      next: (result) => {
         this.loading.set(false);
-        this.messages.update((items) => [...items, { role: 'assistant', content: `Documento ${result.source} procesado con ${result.processor}; ${result.chunks} chunks indexados.` }]);
+        const action = result.replaced_existing ? 'reemplazó la versión previa' : 'se indexó por primera vez';
+        this.messages.update((items) => [...items, {
+          role: 'assistant',
+          content: `Documento ${result.source} procesado con ${result.processor}; ${result.chunks} chunks, ${action}. Idempotency key: ${result.idempotency_key}.`
+        }]);
       },
       error: (error) => {
         this.loading.set(false);

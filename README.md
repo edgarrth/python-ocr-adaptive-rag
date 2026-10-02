@@ -19,6 +19,10 @@ La aplicación procesa documentos con Docling, usa GLM-OCR como ruta OCR cuando 
 
 > Versión v21: eleva el contexto de GLM-OCR/vLLM a `8192` para soportar la muestra OCR real (el encoder visual genera ~4968 tokens de entrada) y desacopla el frontend de `dataset-seed`, de modo que `http://localhost:4200` queda disponible mientras el bootstrap continúa en segundo plano. El smoke test valida también la UI.
 
+> Versión v22: separa la prueba de OCR de la indexación pesada. El log real confirmó que GLM-OCR/vLLM sí completa la inferencia con HTTP 200; el timeout de 600 s ocurría después, dentro de la fase de indexación. `POST /documents/ingest` incorpora `index=false` para validar OCR+chunking sin persistir y `index_external=false` para indexar solo Qdrant/Memgraph. También agrega tiempos por etapa, timeout explícito para LightRAG, logging de progreso, corrige el mensaje del smoke test ante timeouts y vuelve vLLM a ejecución normal (`CUDA_LAUNCH_BLOCKING=0`, logging `INFO`).
+
+> Versión v23: agrega idempotencia documental real. El `document_id`/`idempotency_key` se deriva del SHA-256 del archivo; los IDs de chunk dependen solo de `document_id + position`; antes de reindexar se reemplazan todos los chunks previos del documento en Qdrant y el subgrafo correspondiente en Memgraph, incluido `CO_OCCURS`; el almacén canónico conserva un solo Markdown por `document_id`; y las cargas con `index_external=true` reconstruyen RAGLight/LightRAG desde el corpus canónico para evitar duplicados en esos motores. También se serializan cargas concurrentes del mismo contenido dentro del proceso, se expone `GET /api/v1/documents/{document_id}/index-state`, y el smoke test comprueba una reingesta repetida sin duplicar Qdrant, Memgraph ni el Markdown canónico.
+
 La interfaz está hecha en Angular tomando como base visual el proyecto de ejemplo: navegación a la izquierda, conversación al centro y configuración/evaluación a la derecha. La adapté para carga documental, selección de estrategia, evidencia recuperada, trazabilidad técnica, evaluación y exploración del grafo.
 
 ## Qué quiero demostrar con esta PoC
@@ -131,18 +135,18 @@ El servicio RAGLight no agrega una nueva base ni duplica infraestructura. Sigue 
 
 ## Cómo funciona la ingesta
 
-1. El archivo entra por `POST /api/v1/documents/ingest` o por la carga del dataset.
-2. Para `.md` y `.txt` se conserva el contenido directamente.
-3. Para PDF, DOCX y otros formatos soportados se usa Docling y se exporta a Markdown.
-4. Si el archivo es una imagen o el texto extraído queda debajo de `OCR_MIN_TEXT_CHARS`, se deriva a GLM-OCR.
-5. El documento normalizado se guarda temporalmente como Markdown canónico dentro de `.runtime/canonical`.
-6. `SemanticChunker` agrupa bloques conservando estructura y un solape controlado.
-7. `PaymentEntityExtractor` detecta conceptos de pagos y códigos que sirven para el grafo.
-8. Los chunks se indexan en Qdrant.
-9. Documentos, chunks, entidades y relaciones de co-ocurrencia se materializan en Memgraph.
-10. Para una carga individual, el backend crea un directorio de staging con el Markdown canónico y RAGLight indexa ese directorio. Para el dataset inicial, primero se normalizan todos los documentos y después RAGLight indexa el directorio canónico completo en una sola operación.
-11. Antes de la precarga del dataset se reinician únicamente las colecciones propias de RAGLight para evitar duplicados en un framework que genera IDs nuevos en cada ingesta.
-12. Si LightRAG está configurado con un proveedor OpenAI-compatible, el contenido también se inserta en su índice.
+1. El archivo entra por `POST /api/v1/documents/ingest` o por la carga del dataset. El endpoint permite `index=false` para probar solo parse/OCR+chunking y `index_external=false` para persistir únicamente en Qdrant/Memgraph sin esperar RAGLight/LightRAG.
+2. El SHA-256 del contenido genera un `document_id` estable de 24 caracteres que también funciona como `idempotency_key`. Dos archivos con los mismos bytes, aunque tengan otro nombre, representan el mismo documento lógico.
+3. Las cargas concurrentes del mismo contenido se serializan dentro del proceso para evitar dos reemplazos simultáneos.
+4. Para `.md` y `.txt` se conserva el contenido directamente; para PDF, DOCX y otros formatos soportados se usa Docling; y las imágenes o extracciones pobres se derivan a GLM-OCR según la política configurada.
+5. `SemanticChunker` agrupa bloques conservando estructura y un solape controlado. Cada chunk usa un UUID estable derivado solo de `document_id + position`, por lo que pequeñas variaciones no deterministas del OCR no crean IDs nuevos para la misma posición.
+6. Antes de persistir, Qdrant elimina todos los puntos del `document_id` y luego inserta la representación actual. Esto también elimina chunks sobrantes si una nueva extracción produce menos fragmentos.
+7. Memgraph elimina los chunks anteriores del documento y las relaciones `CO_OCCURS` originadas por esos chunks antes de recrear documento, chunks, entidades y relaciones. Las entidades huérfanas se limpian después.
+8. El Markdown canónico se actualiza en `.runtime/canonical` y se garantiza un solo archivo por `document_id`, incluso si el mismo contenido vuelve con otro nombre.
+9. `index_external=false` termina después de Qdrant/Memgraph y es el modo usado por la UI para mantener una respuesta interactiva.
+10. Si se usa `index_external=true`, RAGLight y LightRAG se reconstruyen desde el corpus canónico completo después de resetear sus stores. En esta PoC pequeña se prioriza consistencia/idempotencia sobre una actualización incremental potencialmente duplicada.
+11. Durante `dataset-seed`, RAGLight y LightRAG se reinician una sola vez y se indexa el corpus canónico completo al final, evitando reconstruir los motores externos documento por documento.
+12. `GET /api/v1/documents/{document_id}/index-state` permite comprobar cuántos chunks existen en Qdrant/Memgraph, cuántos Markdown canónicos hay y si el estado es consistente.
 
 El identificador de cada chunk es un UUID determinista para que Qdrant acepte el punto y para que reingestar el mismo contenido no cree identificadores distintos. Las relaciones `CO_OCCURS` de Memgraph también incluyen el `chunk_id`, de modo que una segunda carga no infla artificialmente los pesos.
 
@@ -253,11 +257,11 @@ docling  fuerza Docling y no llama a GLM-OCR
 Ejemplo para forzar GLM-OCR sobre un PDF escaneado:
 
 ```bash
-curl -X POST "http://localhost:8000/api/v1/documents/ingest?ocr=glm" \
+curl -X POST "http://localhost:8000/api/v1/documents/ingest?ocr=glm&index=false" \
   -F "file=@datasets/ocr_samples/documento_escaneado_prueba_ocr_pagos.pdf"
 ```
 
-El contenedor usa la imagen oficial de vLLM `v0.19.0-ubuntu2404` y fija `transformers==5.3.0`. La imagen de vLLM expone el intérprete como `python3`, por lo que `Dockerfile.glm-ocr` instala y valida Transformers con `python3 -m pip`; no depende del alias `python`. Para la GTX 1650 de 4 GB uso un perfil conservador: `dtype=half`, `TRITON_ATTN`, `--enforce-eager`, `max-num-seqs=1`, contexto `4096`, `gpu-memory-utilization=0.70` y `cpu-offload-gb=1`. El último parámetro mantiene hasta 1 GiB de pesos en RAM y los transfiere durante el forward pass; reduce presión de VRAM a cambio de mayor latencia.
+El contenedor usa la imagen oficial de vLLM `v0.19.0-ubuntu2404` y fija `transformers==5.3.0`. La imagen de vLLM expone el intérprete como `python3`, por lo que `Dockerfile.glm-ocr` instala y valida Transformers con `python3 -m pip`; no depende del alias `python`. Para la GTX 1650 de 4 GB uso un perfil conservador: `dtype=half`, `TRITON_ATTN`, `--enforce-eager`, `max-num-seqs=1`, contexto `8192`, `gpu-memory-utilization=0.70` y `cpu-offload-gb=1`. El último parámetro mantiene hasta 1 GiB de pesos en RAM y los transfiere durante el forward pass; reduce presión de VRAM a cambio de mayor latencia. `CUDA_LAUNCH_BLOCKING` vuelve a `0` y vLLM a logging `INFO` en ejecución normal; el modo síncrono/debug queda solo para diagnóstico.
 
 ## Estructura del proyecto
 
@@ -334,7 +338,8 @@ Los puntos que conviene revisar primero son:
 | ---: | --- | --- | --- |
 | 1 | `GET /api/v1/health` | verificar que la PoC está lista | prueba Qdrant, Memgraph, RAGLight, LightRAG y el servicio local GLM-OCR |
 | 2 | `POST /api/v1/datasets/seed` | cargar el dataset de ejemplo | recorre `datasets/sample_documents`, procesa, fragmenta e indexa en los motores habilitados |
-| 2b | `POST /api/v1/documents/ingest?ocr=auto|glm|docling` | cargar un documento propio | multipart upload -> política OCR -> chunks -> Qdrant/Memgraph/RAGLight/LightRAG |
+| 2b | `POST /api/v1/documents/ingest?ocr=...&index=...&index_external=...` | cargar o validar un documento | usa SHA-256 como clave idempotente; `index=false`: OCR+chunking sin persistencia; `index_external=false`: reemplazo idempotente en Qdrant/Memgraph; por defecto: además reconstruye RAGLight/LightRAG desde el corpus canónico |
+| 2c | `GET /api/v1/documents/{document_id}/index-state` | verificar idempotencia | calcula `expected_chunks` desde el Markdown canónico, compara ese valor con Qdrant/Memgraph y devuelve `consistent=true/false` |
 | 3 | `POST /api/v1/query` | consultar conocimiento | ejecuta estrategia solicitada o router `auto`, recupera evidencia y genera respuesta |
 | 4 | `GET /api/v1/graph/neighborhood/{entity}` | revisar relaciones | consulta relaciones `CO_OCCURS` en Memgraph |
 | 5 | `POST /api/v1/evaluations/run` | comparar motores | ejecuta retrieval contra el set de evaluación y calcula Hit Rate, MRR y latencia |
@@ -698,7 +703,7 @@ documento
   -> LightRAG cuando está configurado
 ```
 
-Qdrant usa IDs deterministas para los chunks y Memgraph usa `MERGE`, por lo que volver a cargar el corpus no crea copias nuevas de esos elementos base. RAGLight usa IDs propios no deterministas, por eso su colección se reinicia antes del seed y se indexa el corpus completo una sola vez. RAGLight 3.4.7 fija `qdrant-client==1.17.0`, mientras que el backend principal usa `qdrant-client==1.19.1`. Por eso Qdrant Server se fija en `1.18.3`: es la versión más reciente de la rama 1.18 y queda a una versión menor de ambos clientes, evitando el conflicto del resolver y la advertencia de compatibilidad en runtime.
+La idempotencia no depende solo de `MERGE`. En v23 Qdrant aplica reemplazo por `document_id`, Memgraph elimina el subgrafo anterior del documento antes de reconstruirlo y el archivo canónico se reemplaza por clave de contenido. RAGLight y LightRAG pueden generar IDs internos propios, por eso una carga con `index_external=true` reconstruye esos motores a partir del corpus canónico completo. Este enfoque es intencional para la escala de la PoC: privilegia consistencia reproducible y evita acumulación de evidencia duplicada. RAGLight 3.4.7 fija `qdrant-client==1.17.0`, mientras que el backend principal usa `qdrant-client==1.19.1`. Por eso Qdrant Server se fija en `1.18.3`: es la versión más reciente de la rama 1.18 y queda a una versión menor de ambos clientes, evitando el conflicto del resolver y la advertencia de compatibilidad en runtime.
 
 ## Prueba de aceptación: cómo demostrar que la PoC funciona
 
@@ -710,13 +715,7 @@ Primero levanto la PoC completa:
 docker compose -f infrastructure/docker-compose.yml up --build
 ```
 
-En otra terminal confirmo que el bootstrap terminó correctamente:
-
-```bash
-docker compose -f infrastructure/docker-compose.yml ps
-```
-
-`dataset-seed` debe terminar con código `0` antes de ejecutar la prueba RAG completa; los servicios `backend`, `qdrant`, `memgraph`, `raglight-service`, `glm-ocr` y `frontend` pueden estar disponibles mientras el seed continúa.
+No necesito esperar manualmente a `dataset-seed`: el smoke test prueba primero infraestructura, UI y OCR, y antes de las consultas RAG espera hasta `SEED_WAIT_SECONDS` (1200 s por defecto) a que `axiz-rag-dataset-seed` termine con código `0`. Si quiero revisar el estado antes, uso `docker compose -f infrastructure/docker-compose.yml ps -a`.
 
 Después ejecuto:
 
@@ -729,11 +728,15 @@ La prueba base verifica automáticamente:
 1. `GET :8080/v1/models` publica `glm-ocr`;
 2. `/api/v1/health` confirma Qdrant, Memgraph, RAGLight y GLM-OCR;
 3. `/docs` responde, cubriendo la regresión del bloqueo del backend durante el seed;
-4. una imagen escaneada real de `datasets/ocr_samples/` se ingiere forzando `ocr=glm`, con `processor=glm-ocr`, `ocr_used=true` y al menos un chunk;
-5. Native RAG recupera `idempotency.md`;
-6. Adaptive Routing envía una pregunta relacional a `graphrag`;
-7. Memgraph devuelve relaciones para `AUTORIZACION`;
-8. RAGLight devuelve evidencia real.
+4. Angular/Nginx responde en `:4200` sin esperar al bootstrap;
+5. una imagen escaneada real se procesa con `ocr=glm&index_external=false`, comprobando GLM-OCR y persistencia idempotente en Qdrant/Memgraph sin esperar RAGLight/LightRAG;
+6. `dataset-seed` termina con código `0` antes de iniciar las pruebas de retrieval;
+7. el mismo `idempotency.md` se ingiere dos veces y `GET /documents/{document_id}/index-state` exige que Qdrant y Memgraph tengan exactamente el número actual de chunks, que exista un solo Markdown canónico y que `consistent=true`;
+8. Native RAG recupera `idempotency.md`;
+9. Adaptive Routing envía una pregunta relacional a `graphrag`;
+10. Memgraph devuelve relaciones para `AUTORIZACION`;
+11. RAGLight devuelve evidencia real;
+12. si LightRAG está configurado, ejecuta una consulta real y exige contexto recuperado.
 
 El script termina con código `0` únicamente si todas las comprobaciones base pasan. Un resultado esperado es similar a:
 
@@ -741,16 +744,21 @@ El script termina con código `0` únicamente si todas las comprobaciones base p
 [OK] vLLM publica el modelo glm-ocr
 [OK] Backend + Qdrant + Memgraph + RAGLight + GLM-OCR responden
 [OK] FastAPI mantiene /docs disponible
-[OK] GLM-OCR procesó una imagen real y produjo chunks
+[OK] Frontend Angular está disponible sin esperar al dataset-seed
+[OK] LightRAG está disponible
+[OK] GLM-OCR procesó una imagen real ... e indexó sin duplicar motores externos
+[OK] dataset-seed terminó correctamente
+[OK] Reingesta idempotente reemplaza el documento sin duplicar Qdrant/Memgraph/canónico
 [OK] Native RAG recupera idempotency.md
 [OK] Adaptive Routing selecciona GraphRAG para una consulta relacional
 [OK] Memgraph devuelve relaciones para AUTORIZACION
 [OK] RAGLight recupera evidencia
-Resultado: 8 comprobaciones OK, 0/1 advertencias.
+[OK] LightRAG recupera contexto real
+Resultado: 13 comprobaciones OK, 0 advertencias.
 La PoC supera la prueba funcional base.
 ```
 
-`LightRAG` es opcional en la prueba base porque necesita un proveedor OpenAI-compatible. Si no está configurado, el script lo marca como `WARN` y no considera que la PoC base haya fallado.
+Si LightRAG no está configurado, el script lo marca como `WARN` y omite la consulta funcional de ese motor. Si está configurado, ya no se limita a revisar la bandera de health: ejecuta una recuperación real.
 
 Para añadir la evaluación comparativa de retrieval:
 
@@ -897,7 +905,7 @@ Ejecuta el mismo set contra Native RAG, Hybrid RAG, RAGLight, GraphRAG y LightRA
 Incluyo un PDF y un JPG escaneados en `datasets/ocr_samples/`. La prueba recomendada fuerza GLM-OCR para que Docling no pueda resolver el documento antes:
 
 ```bash
-curl -X POST "http://localhost:8000/api/v1/documents/ingest?ocr=glm" \
+curl -X POST "http://localhost:8000/api/v1/documents/ingest?ocr=glm&index=false" \
   -F "file=@datasets/ocr_samples/documento_escaneado_prueba_ocr_pagos.pdf"
 ```
 
@@ -907,8 +915,13 @@ La respuesta debe incluir:
 {
   "processor": "glm-ocr",
   "ocr_used": true,
-  "raglight_indexed": true,
-  "lightrag_indexed": true
+  "indexed": false,
+  "raglight_indexed": false,
+  "lightrag_indexed": false,
+  "timings_ms": {
+    "parse_ocr": 12345.67,
+    "total": 12350.12
+  }
 }
 ```
 
@@ -920,6 +933,23 @@ curl -X POST "http://localhost:8000/api/v1/documents/ingest?ocr=docling" \
 ```
 
 `ocr=auto` mantiene el comportamiento de producción: imágenes van directo a GLM-OCR; los PDF digitales pasan primero por Docling y usan GLM-OCR solo si la extracción queda por debajo de `OCR_MIN_TEXT_CHARS`.
+
+Para una carga interactiva rápida que sí persista el documento en los índices base, uso:
+
+```bash
+curl -X POST "http://localhost:8000/api/v1/documents/ingest?ocr=glm&index_external=false" \
+  -F "file=@datasets/ocr_samples/documento_escaneado_prueba_ocr_pagos.jpg"
+```
+
+Esto reemplaza de forma idempotente la representación del documento en Qdrant y Memgraph, actualiza un único Markdown canónico y no espera RAGLight/LightRAG. La respuesta incluye `idempotency_key` y `replaced_existing`. La UI usa este modo para no congelar la experiencia. Si quiero reindexación completa explícita, omito `index_external=false`; en ese caso RAGLight y LightRAG se reconstruyen desde el corpus canónico completo para no acumular documentos duplicados.
+
+Puedo comprobar el estado de idempotencia con:
+
+```bash
+curl http://localhost:8000/api/v1/documents/<document_id>/index-state
+```
+
+Un estado sano debe mostrar `expected_chunks == qdrant_chunks == memgraph_chunks`, `canonical_files: 1` y `consistent: true`.
 
 Para comprobar el modelo vLLM directamente:
 
@@ -983,19 +1013,19 @@ conda run -n axiz-adaptive-rag-payments npm --prefix frontend run build
 
 ## Estado de validación de esta entrega
 
-Antes de empaquetar v21 validé en este entorno:
+Antes de empaquetar v23 validé en este entorno:
 
 - `compileall` del backend, dataset y servicio RAGLight;
-- `29 passed` en `backend/tests`, incluyendo el bootstrap directo y la llamada self-hosted directa a vLLM;
+- `35 passed` en `backend/tests`, incluyendo chunk IDs estables, reingesta del mismo documento sin crecimiento del índice, un solo Markdown canónico para el mismo contenido y el endpoint de estado idempotente a nivel de servicio;
 - `8 passed` en `raglight_service/tests`;
 - parseo YAML del Compose;
-- sintaxis Bash de `infrastructure/scripts/smoke-test.sh`, incluyendo la comprobación del frontend en `:4200`;
-- wheel del backend `0.1.10`;
+- sintaxis Bash de `infrastructure/scripts/smoke-test.sh`, incluyendo la nueva prueba de reingesta idempotente;
+- wheel del backend `0.1.12`;
 - wheel de RAGLight `0.2.3`;
-- presencia del perfil diagnóstico `cpu-offload-gb=1`, `skip-mm-profiling`, `custom_ops=["none"]`, `CUDA_LAUNCH_BLOCKING=1`, logging `DEBUG` y `max-model-len=8192`;
-- que el frontend depende solo del backend y no de `dataset-seed`.
+- perfil GTX 1650 con `cpu-offload-gb=1`, `skip-mm-profiling`, `custom_ops=["none"]`, `CUDA_LAUNCH_BLOCKING=0`, logging `INFO` y `max-model-len=8192`;
+- que el frontend depende solo del backend y muestra si una carga reemplazó una versión previa.
 
-No volví a ejecutar el build Angular en este entorno porque no tiene `frontend/node_modules` ni acceso de red para restaurarlos; el código Angular y su Dockerfile no fueron modificados respecto de v18. En v21 solo cambió su dependencia de arranque en Docker Compose. El entorno usado para preparar el ZIP tampoco tiene Docker/NVIDIA, por lo que no afirmo una validación de arranque real de vLLM/GPU desde aquí. La prueba reproducible en la máquina destino es `bash infrastructure/scripts/smoke-test.sh`.
+La ejecución física compartida por el usuario sobre v22 ya había cerrado la validación end-to-end con `RUN_EVALUATION=true`: 11 comprobaciones OK, 0 advertencias, incluyendo OCR real, Native RAG, Adaptive Routing/GraphRAG, Memgraph, RAGLight y evaluación. En este entorno no afirmo una nueva validación física Docker/NVIDIA de v23. Tampoco recompilé Angular porque `frontend/node_modules` no está presente y no se restauraron dependencias; el cambio de TypeScript es pequeño y queda cubierto por revisión estática. La prueba reproducible para validar específicamente la idempotencia de v23 en la máquina destino es `RUN_EVALUATION=true bash infrastructure/scripts/smoke-test.sh`.
 
 ## Decisiones de alcance
 
@@ -1065,11 +1095,11 @@ cpu-offload-gb=1
 limit-mm-per-prompt={"image":1,"video":0}
 skip-mm-profiling=true
 custom_ops=["none"]
-CUDA_LAUNCH_BLOCKING=1
-VLLM_LOGGING_LEVEL=DEBUG
+CUDA_LAUNCH_BLOCKING=0
+VLLM_LOGGING_LEVEL=INFO
 ```
 
-La configuración de v20 mantiene deliberadamente el perfil diagnóstico de GPU introducido en v18. `custom_ops=["none"]` intenta evitar extensiones CUDA específicas de vLLM y `CUDA_LAUNCH_BLOCKING=1` vuelve síncrono el reporte de errores CUDA para que el stack trace señale la operación que realmente dispara el fallo. Una vez identificada la causa, estos flags pueden relajarse para recuperar rendimiento.
+En v22 el perfil deja el modo diagnóstico permanente: la inferencia real ya llegó a `POST /v1/chat/completions` y terminó con HTTP 200 en la GTX 1650. Mantengo `custom_ops=["none"]`, eager mode, offload y los backends compatibles con SM75 porque son los ajustes que hicieron estable el arranque, pero `CUDA_LAUNCH_BLOCKING=0` y logging `INFO` recuperan rendimiento y evitan miles de líneas por token. Si reaparece un error CUDA difícil de localizar, puedo cambiar temporalmente `CUDA_LAUNCH_BLOCKING=1` y `VLLM_LOGGING_LEVEL=DEBUG` desde `.env`, reproducirlo y luego volver a los valores normales.
 
 Para probar solo GLM-OCR sin reconstruir el resto del stack:
 

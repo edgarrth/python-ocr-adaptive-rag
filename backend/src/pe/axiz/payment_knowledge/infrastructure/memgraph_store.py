@@ -25,6 +25,67 @@ class MemgraphStore:
         except Exception:
             return False
 
+
+    def count_document_chunks(self, document_id: str) -> int:
+        with self.driver.session() as session:
+            record = session.run(
+                """
+                MATCH (d:Document {id:$document_id})-[:CONTAINS]->(c:Chunk)
+                RETURN count(c) AS count
+                """,
+                document_id=document_id,
+            ).single()
+            return int(record["count"] if record else 0)
+
+    def document_exists(self, document_id: str) -> bool:
+        return self.count_document_chunks(document_id) > 0
+
+    def delete_document_content(self, document_id: str) -> None:
+        """Elimina chunks y relaciones derivadas de un documento antes de reemplazarlo."""
+        with self.driver.session() as session:
+            record = session.run(
+                """
+                MATCH (d:Document {id:$document_id})-[:CONTAINS]->(c:Chunk)
+                RETURN collect(c.id) AS chunk_ids
+                """,
+                document_id=document_id,
+            ).single()
+            chunk_ids = list(record["chunk_ids"] or []) if record else []
+
+            if chunk_ids:
+                session.run(
+                    """
+                    MATCH ()-[r:CO_OCCURS]->()
+                    WHERE r.chunk_id IN $chunk_ids
+                    DELETE r
+                    """,
+                    chunk_ids=chunk_ids,
+                ).consume()
+
+            session.run(
+                """
+                MATCH (d:Document {id:$document_id})-[:CONTAINS]->(c:Chunk)
+                DETACH DELETE c
+                """,
+                document_id=document_id,
+            ).consume()
+
+    def replace_document(self, chunks: list[DocumentChunk]) -> None:
+        """Reemplaza el subgrafo del documento para hacer la ingesta idempotente."""
+        if not chunks:
+            return
+        document_id = chunks[0].document_id
+        self.delete_document_content(document_id)
+        self.upsert_document(chunks)
+        with self.driver.session() as session:
+            session.run(
+                """
+                MATCH (e:Entity)
+                WHERE NOT (e)<-[:MENTIONS]-(:Chunk)
+                DETACH DELETE e
+                """
+            ).consume()
+
     def upsert_document(self, chunks: list[DocumentChunk]) -> None:
         if not chunks:
             return

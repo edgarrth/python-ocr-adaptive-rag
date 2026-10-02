@@ -69,8 +69,22 @@ class IngestResponse(BaseModel):
     chunks: int
     entities: int
     ocr_used: bool
+    indexed: bool = True
     raglight_indexed: bool
     lightrag_indexed: bool
+    idempotency_key: str = ""
+    replaced_existing: bool = False
+    timings_ms: dict[str, float] = Field(default_factory=dict)
+
+
+class DocumentIndexState(BaseModel):
+    document_id: str
+    expected_chunks: int
+    qdrant_chunks: int
+    memgraph_chunks: int
+    canonical_files: int
+    canonical_sources: list[str] = Field(default_factory=list)
+    consistent: bool
 
 
 class HealthResponse(BaseModel):

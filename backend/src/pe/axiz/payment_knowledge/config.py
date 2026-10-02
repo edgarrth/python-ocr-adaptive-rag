@@ -51,6 +51,7 @@ class Settings(BaseSettings):
     raglight_timeout_seconds: float = 600.0
     lightrag_enabled: bool = True
     lightrag_workdir: Path = Path(".runtime/lightrag")
+    lightrag_timeout_seconds: float = 300.0
     datasets_dir: Path = Path("datasets/sample_documents")
 
     def parsed_cors_origins(self) -> list[str]:

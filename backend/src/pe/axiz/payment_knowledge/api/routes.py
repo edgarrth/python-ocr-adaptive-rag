@@ -10,6 +10,7 @@ from starlette.concurrency import run_in_threadpool
 
 from pe.axiz.payment_knowledge.container import AppContainer, get_container
 from pe.axiz.payment_knowledge.domain.models import (
+    DocumentIndexState,
     EvaluationRequest,
     EvaluationResponse,
     HealthResponse,
@@ -49,6 +50,14 @@ def health() -> HealthResponse:
 async def ingest_document(
     file: UploadFile = File(...),
     ocr: OcrPolicy | None = Query(default=None, description="auto | glm | docling"),
+    index: bool = Query(
+        default=True,
+        description="false valida parse/OCR+chunking sin persistir en ningún índice",
+    ),
+    index_external: bool = Query(
+        default=True,
+        description="false indexa solo Qdrant/Memgraph y omite RAGLight/LightRAG",
+    ),
 ) -> IngestResponse:
     source_name = Path(file.filename or "document.bin").name
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -56,7 +65,12 @@ async def ingest_document(
         with temp_path.open("wb") as target:
             shutil.copyfileobj(file.file, target)
         try:
-            return await get_container().ingestion.ingest_path(temp_path, ocr_policy=ocr)
+            return await get_container().ingestion.ingest_path(
+                temp_path,
+                ocr_policy=ocr,
+                index=index,
+                index_external=index_external,
+            )
         except Exception as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -72,6 +86,14 @@ def _run_seed_in_isolated_container() -> list[IngestResponse]:
             await container.close()
 
     return asyncio.run(_run())
+
+
+@router.get("/documents/{document_id}/index-state", response_model=DocumentIndexState)
+def document_index_state(document_id: str) -> DocumentIndexState:
+    try:
+        return get_container().ingestion.index_state(document_id)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @router.post("/datasets/seed", response_model=list[IngestResponse])

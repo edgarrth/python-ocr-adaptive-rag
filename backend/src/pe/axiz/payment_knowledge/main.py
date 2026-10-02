@@ -19,7 +19,7 @@ async def lifespan(_: FastAPI):
         await container.close()
 
 
-app = FastAPI(title=settings.app_name, version="0.1.5", lifespan=lifespan)
+app = FastAPI(title=settings.app_name, version="0.1.12", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.parsed_cors_origins(),

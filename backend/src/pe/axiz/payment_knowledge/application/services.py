@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import shutil
@@ -10,11 +11,13 @@ from pathlib import Path
 from pe.axiz.payment_knowledge.config import Settings
 from pe.axiz.payment_knowledge.domain.models import (
     ContextItem,
+    DocumentIndexState,
     EvaluationItem,
     EvaluationRequest,
     EvaluationResponse,
     IngestResponse,
     OcrPolicy,
+    ParsedDocument,
     QueryRequest,
     QueryResponse,
     RetrievalStrategy,
@@ -54,46 +57,135 @@ class IngestionService:
         self.lightrag = lightrag
         self.canonical_dir = canonical_dir
         self.canonical_dir.mkdir(parents=True, exist_ok=True)
+        self._document_locks: dict[str, asyncio.Lock] = {}
+        self._external_rebuild_lock = asyncio.Lock()
 
-    async def ingest_path(self, path: Path, ocr_policy: OcrPolicy | None = None) -> IngestResponse:
-        return await self._ingest_path(
-            path,
-            index_raglight=True,
-            index_lightrag=True,
-            ocr_policy=ocr_policy,
-        )
+    async def ingest_path(
+        self,
+        path: Path,
+        ocr_policy: OcrPolicy | None = None,
+        *,
+        index: bool = True,
+        index_external: bool = True,
+    ) -> IngestResponse:
+        document_key = await asyncio.to_thread(self._content_key, path)
+        lock = self._document_locks.setdefault(document_key, asyncio.Lock())
+        async with lock:
+            return await self._ingest_path(
+                path,
+                index_base=index,
+                index_raglight=index and index_external,
+                index_lightrag=index and index_external,
+                ocr_policy=ocr_policy,
+            )
 
     async def _ingest_path(
         self,
         path: Path,
         *,
+        index_base: bool = True,
         index_raglight: bool,
         index_lightrag: bool,
         ocr_policy: OcrPolicy | None = None,
     ) -> IngestResponse:
-        document = await asyncio.to_thread(self.processor.parse, path, ocr_policy)
-        chunks = self.chunker.split(document)
-        await asyncio.to_thread(self.qdrant.upsert, chunks)
-        await asyncio.to_thread(self.memgraph.upsert_document, chunks)
+        timings: dict[str, float] = {}
+        total_started = time.perf_counter()
 
-        canonical_path = self._canonical_path(document.document_id, document.source_name)
-        canonical_path.write_text(document.markdown, encoding="utf-8")
+        stage_started = time.perf_counter()
+        logger.info("Ingesta %s: iniciando parse/OCR", path.name)
+        document = await asyncio.to_thread(self.processor.parse, path, ocr_policy)
+        timings["parse_ocr"] = round((time.perf_counter() - stage_started) * 1000, 2)
+        logger.info(
+            "Ingesta %s: parse/OCR completado con %s en %.2f ms",
+            path.name,
+            document.processor,
+            timings["parse_ocr"],
+        )
+
+        stage_started = time.perf_counter()
+        chunks = self.chunker.split(document)
+        timings["chunking"] = round((time.perf_counter() - stage_started) * 1000, 2)
 
         raglight_indexed = False
-        if index_raglight and self.raglight.available:
-            stage_dir = self.canonical_dir / "_raglight_stage" / document.document_id
-            stage_dir.mkdir(parents=True, exist_ok=True)
-            staged_file = stage_dir / canonical_path.name
-            shutil.copy2(canonical_path, staged_file)
-            try:
-                raglight_indexed = await asyncio.to_thread(self.raglight.index, stage_dir)
-            finally:
-                shutil.rmtree(stage_dir, ignore_errors=True)
-
         lightrag_indexed = False
-        if index_lightrag and self.lightrag.available:
-            lightrag_indexed = await self.lightrag.index(canonical_path)
+        replaced_existing = False
 
+        if index_base:
+            stage_started = time.perf_counter()
+            qdrant_existing, memgraph_existing = await asyncio.gather(
+                asyncio.to_thread(self.qdrant.document_exists, document.document_id),
+                asyncio.to_thread(self.memgraph.document_exists, document.document_id),
+            )
+            replaced_existing = qdrant_existing or memgraph_existing
+            timings["idempotency_lookup"] = round(
+                (time.perf_counter() - stage_started) * 1000, 2
+            )
+
+            stage_started = time.perf_counter()
+            logger.info(
+                "Ingesta %s: reemplazando representación de %s chunks en Qdrant",
+                path.name,
+                len(chunks),
+            )
+            await asyncio.to_thread(self.qdrant.replace_document, chunks)
+            timings["qdrant"] = round((time.perf_counter() - stage_started) * 1000, 2)
+
+            stage_started = time.perf_counter()
+            logger.info("Ingesta %s: reemplazando subgrafo en Memgraph", path.name)
+            await asyncio.to_thread(self.memgraph.replace_document, chunks)
+            timings["memgraph"] = round((time.perf_counter() - stage_started) * 1000, 2)
+
+            stage_started = time.perf_counter()
+            canonical_path = self._write_canonical(document)
+            timings["canonical"] = round((time.perf_counter() - stage_started) * 1000, 2)
+
+            if (
+                (index_raglight and self.raglight.available)
+                or (index_lightrag and self.lightrag.available)
+            ):
+                async with self._external_rebuild_lock:
+                    if index_raglight and self.raglight.available:
+                        stage_started = time.perf_counter()
+                        logger.info(
+                            "Ingesta %s: reconstruyendo RAGLight desde el corpus canónico "
+                            "para evitar duplicados",
+                            path.name,
+                        )
+                        await asyncio.to_thread(self.raglight.reset)
+                        await asyncio.to_thread(self.raglight.ready)
+                        try:
+                            raglight_indexed = await asyncio.wait_for(
+                                asyncio.to_thread(self.raglight.index, self.canonical_dir),
+                                timeout=float(self.settings.raglight_timeout_seconds) + 5.0,
+                            )
+                        except TimeoutError as exc:
+                            raise RuntimeError(
+                                f"RAGLight excedió {self.settings.raglight_timeout_seconds:.0f}s "
+                                f"reconstruyendo el corpus tras {path.name}"
+                            ) from exc
+                        timings["raglight"] = round(
+                            (time.perf_counter() - stage_started) * 1000, 2
+                        )
+
+                    if index_lightrag and self.lightrag.available:
+                        stage_started = time.perf_counter()
+                        logger.info(
+                            "Ingesta %s: reconstruyendo LightRAG desde el corpus canónico "
+                            "para evitar duplicados",
+                            path.name,
+                        )
+                        await self.lightrag.reset()
+                        lightrag_indexed = await self.lightrag.index()
+                        timings["lightrag"] = round(
+                            (time.perf_counter() - stage_started) * 1000, 2
+                        )
+        else:
+            logger.info(
+                "Ingesta %s: index=false, se validó parse/OCR+chunking sin persistir índices",
+                path.name,
+            )
+
+        timings["total"] = round((time.perf_counter() - total_started) * 1000, 2)
         return IngestResponse(
             document_id=document.document_id,
             source=document.source_name,
@@ -101,8 +193,12 @@ class IngestionService:
             chunks=len(chunks),
             entities=len({entity for chunk in chunks for entity in chunk.entities}),
             ocr_used=document.ocr_used,
+            indexed=index_base,
             raglight_indexed=raglight_indexed,
             lightrag_indexed=lightrag_indexed,
+            idempotency_key=document.document_id,
+            replaced_existing=replaced_existing,
+            timings_ms=timings,
         )
 
     async def ingest_dataset(self) -> list[IngestResponse]:
@@ -126,16 +222,18 @@ class IngestionService:
             logger.info("Indexando documento %s/%s: %s", index, len(paths), path.name)
             result = await self._ingest_path(
                 path,
+                index_base=True,
                 index_raglight=False,
-                index_lightrag=True,
+                index_lightrag=False,
                 ocr_policy=None,
             )
             results.append(result)
             logger.info(
-                "Documento indexado: %s, chunks=%s, entidades=%s, lightrag=%s",
+                "Documento indexado: %s, chunks=%s, entidades=%s, reemplazado=%s, lightrag=%s",
                 result.source,
                 result.chunks,
                 result.entities,
+                result.replaced_existing,
                 result.lightrag_indexed,
             )
 
@@ -146,12 +244,70 @@ class IngestionService:
             if not raglight_indexed:
                 raise RuntimeError("RAGLight no confirmó la indexación del dataset")
 
-        if raglight_indexed:
+        lightrag_indexed = False
+        if self.lightrag.available:
+            logger.info("Indexando el corpus canónico completo en LightRAG")
+            lightrag_indexed = await self.lightrag.index()
+            if not lightrag_indexed:
+                raise RuntimeError("LightRAG no confirmó la indexación del dataset")
+
+        if raglight_indexed or lightrag_indexed:
             results = [
-                result.model_copy(update={"raglight_indexed": True})
+                result.model_copy(
+                    update={
+                        "raglight_indexed": raglight_indexed or result.raglight_indexed,
+                        "lightrag_indexed": lightrag_indexed or result.lightrag_indexed,
+                    }
+                )
                 for result in results
             ]
         return results
+
+    def index_state(self, document_id: str) -> DocumentIndexState:
+        qdrant_chunks = self.qdrant.count_document(document_id)
+        memgraph_chunks = self.memgraph.count_document_chunks(document_id)
+        canonical = sorted(self.canonical_dir.glob(f"{document_id}__*.md"))
+        canonical_files = len(canonical)
+        expected_chunks = 0
+        if canonical_files == 1:
+            canonical_path = canonical[0]
+            canonical_document = ParsedDocument(
+                document_id=document_id,
+                source_path=canonical_path,
+                source_name=canonical_path.name.split("__", 1)[-1],
+                title=canonical_path.stem,
+                markdown=canonical_path.read_text(encoding="utf-8"),
+                processor="canonical-state",
+            )
+            expected_chunks = len(self.chunker.split(canonical_document))
+
+        consistent = (
+            canonical_files <= 1
+            and qdrant_chunks == memgraph_chunks == expected_chunks
+            and (canonical_files == 1 or expected_chunks == 0)
+        )
+        return DocumentIndexState(
+            document_id=document_id,
+            expected_chunks=expected_chunks,
+            qdrant_chunks=qdrant_chunks,
+            memgraph_chunks=memgraph_chunks,
+            canonical_files=canonical_files,
+            canonical_sources=[path.name for path in canonical],
+            consistent=consistent,
+        )
+
+
+    @staticmethod
+    def _content_key(path: Path) -> str:
+        return hashlib.sha256(path.read_bytes()).hexdigest()[:24]
+
+    def _write_canonical(self, document) -> Path:
+        canonical_path = self._canonical_path(document.document_id, document.source_name)
+        for previous in self.canonical_dir.glob(f"{document.document_id}__*.md"):
+            if previous != canonical_path:
+                previous.unlink(missing_ok=True)
+        canonical_path.write_text(document.markdown, encoding="utf-8")
+        return canonical_path
 
     def _canonical_path(self, document_id: str, source_name: str) -> Path:
         return self.canonical_dir / canonical_markdown_name(document_id, source_name)

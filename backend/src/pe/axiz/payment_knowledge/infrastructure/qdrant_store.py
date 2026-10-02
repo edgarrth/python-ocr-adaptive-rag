@@ -33,6 +33,45 @@ class QdrantStore:
                 vectors_config=models.VectorParams(size=self.dimension, distance=models.Distance.COSINE),
             )
 
+    @staticmethod
+    def _document_filter(document_id: str) -> models.Filter:
+        return models.Filter(
+            must=[
+                models.FieldCondition(
+                    key="document_id",
+                    match=models.MatchValue(value=document_id),
+                )
+            ]
+        )
+
+    def count_document(self, document_id: str) -> int:
+        self.ensure_collection()
+        result = self.client.count(
+            collection_name=self.collection,
+            count_filter=self._document_filter(document_id),
+            exact=True,
+        )
+        return int(result.count)
+
+    def document_exists(self, document_id: str) -> bool:
+        return self.count_document(document_id) > 0
+
+    def delete_document(self, document_id: str) -> None:
+        self.ensure_collection()
+        self.client.delete(
+            collection_name=self.collection,
+            points_selector=models.FilterSelector(filter=self._document_filter(document_id)),
+            wait=True,
+        )
+
+    def replace_document(self, chunks: list[DocumentChunk]) -> None:
+        """Reemplaza el documento completo para evitar chunks huérfanos o duplicados."""
+        if not chunks:
+            return
+        document_id = chunks[0].document_id
+        self.delete_document(document_id)
+        self.upsert(chunks)
+
     def upsert(self, chunks: list[DocumentChunk]) -> None:
         if not chunks:
             return

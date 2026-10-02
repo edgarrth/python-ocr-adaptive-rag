@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import shutil
 from pathlib import Path
 from typing import Any
@@ -27,7 +28,16 @@ class LightRagAdapter:
         rag = await self._get_rag()
         paths = [path] if path else sorted(self.canonical_dir.glob("*.md"))
         for item in paths:
-            await rag.ainsert(item.read_text(encoding="utf-8"), file_paths=str(item))
+            try:
+                await asyncio.wait_for(
+                    rag.ainsert(item.read_text(encoding="utf-8"), file_paths=str(item)),
+                    timeout=self.settings.lightrag_timeout_seconds,
+                )
+            except TimeoutError as exc:
+                raise RuntimeError(
+                    f"LightRAG excedió {self.settings.lightrag_timeout_seconds:.0f}s "
+                    f"indexando {item.name}"
+                ) from exc
         return True
 
     async def reset(self) -> None:
@@ -44,10 +54,18 @@ class LightRagAdapter:
         from lightrag import QueryParam
 
         rag = await self._get_rag()
-        result = await rag.aquery(
-            question,
-            param=QueryParam(mode="hybrid", only_need_context=True, top_k=top_k),
-        )
+        try:
+            result = await asyncio.wait_for(
+                rag.aquery(
+                    question,
+                    param=QueryParam(mode="hybrid", only_need_context=True, top_k=top_k),
+                ),
+                timeout=self.settings.lightrag_timeout_seconds,
+            )
+        except TimeoutError as exc:
+            raise RuntimeError(
+                f"LightRAG excedió {self.settings.lightrag_timeout_seconds:.0f}s durante la consulta"
+            ) from exc
         content = getattr(result, "content", None)
         text = content if content is not None else (result if isinstance(result, str) else str(result))
 
