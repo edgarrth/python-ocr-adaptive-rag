@@ -35,9 +35,14 @@ class Settings(BaseSettings):
     openai_embedding_model: str = "text-embedding-3-small"
     openai_embedding_dimension: int = 1536
 
-    glm_ocr_mode: str = "maas"
-    glm_ocr_api_url: str = ""
+    glm_ocr_mode: str = "selfhosted"
+    glm_ocr_api_url: str = "http://localhost:8080/v1/chat/completions"
+    glm_ocr_model: str = "glm-ocr"
+    glm_ocr_layout_device: str = "cpu"
+    glm_ocr_max_workers: int = 4
+    glm_ocr_request_timeout_seconds: int = 300
     zhipu_api_key: str = ""
+    ocr_policy: str = "auto"
     ocr_min_text_chars: int = 120
 
     raglight_enabled: bool = True

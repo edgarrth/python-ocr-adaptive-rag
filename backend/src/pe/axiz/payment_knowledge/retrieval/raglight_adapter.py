@@ -6,6 +6,11 @@ import httpx
 
 from pe.axiz.payment_knowledge.config import Settings
 from pe.axiz.payment_knowledge.domain.models import ContextItem
+from pe.axiz.payment_knowledge.retrieval.source_attribution import (
+    canonical_source_name,
+    infer_source_from_text,
+    is_generic_source,
+)
 
 
 class RagLightAdapter:
@@ -77,19 +82,44 @@ class RagLightAdapter:
 
         result: list[ContextItem] = []
         for index, item in enumerate(payload):
-            metadata = item.get("metadata", {}) or {}
-            source = self._source_name(str(item.get("source", "raglight")))
+            metadata = dict(item.get("metadata", {}) or {})
+            text = str(item.get("text", ""))
+            raw_source = str(item.get("source", "raglight"))
+            source = canonical_source_name(raw_source)
+            document_id = str(item.get("document_id", ""))
+
+            if is_generic_source(source):
+                inferred = infer_source_from_text(text, self.canonical_dir)
+                if inferred is not None:
+                    source = inferred.source
+                    document_id = document_id or inferred.document_id
+                    metadata.update(
+                        {
+                            "canonical_name": inferred.canonical_name,
+                            "source_attribution": inferred.method,
+                            "source_attribution_score": inferred.score,
+                        }
+                    )
+                else:
+                    metadata.setdefault("source_attribution", "unavailable")
+
+            raw_title = str(item.get("title", "")).strip()
+            title = (
+                Path(source).stem
+                if not raw_title or raw_title.lower() in {"raglight", "document", "unknown"}
+                else raw_title
+            )
             result.append(
                 ContextItem(
                     id=str(item.get("id", f"raglight-{index}")),
-                    document_id=str(item.get("document_id", "")),
+                    document_id=document_id,
                     source=Path(source).name,
-                    title=str(item.get("title", Path(source).stem)),
-                    text=str(item.get("text", "")),
+                    title=title,
+                    text=text,
                     score=float(item.get("score", 1.0 / (index + 1))),
                     strategy="raglight",
                     entities=[],
-                    metadata=dict(metadata),
+                    metadata=metadata,
                 )
             )
         return result
@@ -115,7 +145,4 @@ class RagLightAdapter:
 
     @staticmethod
     def _source_name(source: str) -> str:
-        name = Path(source).name
-        if "__" in name:
-            name = name.split("__", 1)[1]
-        return name
+        return canonical_source_name(source)

@@ -1,0 +1,10 @@
+{
+  "document_id": "<sha256-24>",
+  "source": "documento_escaneado_prueba_ocr_pagos.pdf",
+  "processor": "glm-ocr",
+  "chunks": 2,
+  "entities": 1,
+  "ocr_used": true,
+  "raglight_indexed": true,
+  "lightrag_indexed": true
+}

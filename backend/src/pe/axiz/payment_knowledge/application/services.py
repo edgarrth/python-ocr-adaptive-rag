@@ -13,6 +13,7 @@ from pe.axiz.payment_knowledge.domain.models import (
     EvaluationRequest,
     EvaluationResponse,
     IngestResponse,
+    OcrPolicy,
     QueryRequest,
     QueryResponse,
     RetrievalStrategy,
@@ -50,8 +51,13 @@ class IngestionService:
         self.canonical_dir = canonical_dir
         self.canonical_dir.mkdir(parents=True, exist_ok=True)
 
-    async def ingest_path(self, path: Path) -> IngestResponse:
-        return await self._ingest_path(path, index_raglight=True, index_lightrag=True)
+    async def ingest_path(self, path: Path, ocr_policy: OcrPolicy | None = None) -> IngestResponse:
+        return await self._ingest_path(
+            path,
+            index_raglight=True,
+            index_lightrag=True,
+            ocr_policy=ocr_policy,
+        )
 
     async def _ingest_path(
         self,
@@ -59,8 +65,9 @@ class IngestionService:
         *,
         index_raglight: bool,
         index_lightrag: bool,
+        ocr_policy: OcrPolicy | None = None,
     ) -> IngestResponse:
-        document = await asyncio.to_thread(self.processor.parse, path)
+        document = await asyncio.to_thread(self.processor.parse, path, ocr_policy)
         chunks = self.chunker.split(document)
         await asyncio.to_thread(self.qdrant.upsert, chunks)
         await asyncio.to_thread(self.memgraph.upsert_document, chunks)
@@ -115,6 +122,7 @@ class IngestionService:
                         path,
                         index_raglight=False,
                         index_lightrag=True,
+                        ocr_policy=None,
                     )
                 )
 

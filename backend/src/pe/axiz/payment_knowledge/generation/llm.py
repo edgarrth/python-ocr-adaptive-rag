@@ -34,7 +34,6 @@ class AnswerGenerator:
                 },
                 {"role": "user", "content": f"Pregunta: {question}\n\nEvidencia:\n{evidence}"},
             ],
-            "temperature": 0.1,
         }
         headers = {"Authorization": f"Bearer {self.settings.openai_api_key}"}
         response = httpx.post(
@@ -43,15 +42,32 @@ class AnswerGenerator:
             headers=headers,
             timeout=90,
         )
-        response.raise_for_status()
+        self._raise_for_status(response)
         return response.json()["choices"][0]["message"]["content"]
+
+    @staticmethod
+    def _raise_for_status(response: httpx.Response) -> None:
+        if not response.is_error:
+            return
+        detail = response.text
+        try:
+            payload = response.json()
+            if isinstance(payload, dict):
+                error = payload.get("error")
+                if isinstance(error, dict) and error.get("message"):
+                    detail = str(error["message"])
+                elif payload.get("detail"):
+                    detail = str(payload["detail"])
+        except ValueError:
+            pass
+        raise RuntimeError(f"OpenAI-compatible API respondió HTTP {response.status_code}: {detail}")
 
     @staticmethod
     def _extractive(question: str, contexts: list[ContextItem]) -> str:
         if not contexts:
             return "No encontré evidencia suficiente en los documentos cargados para responder la consulta."
         lines = [
-            f"Para la consulta \"{question}\" encontré evidencia en {len(contexts)} contexto(s).",
+            f'Para la consulta "{question}" encontré evidencia en {len(contexts)} contexto(s).',
             "",
         ]
         for index, context in enumerate(contexts[:4], start=1):

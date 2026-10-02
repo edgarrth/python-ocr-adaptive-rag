@@ -32,6 +32,40 @@ services:
       - axiz-rag
     restart: unless-stopped
 
+
+  glm-ocr:
+    image: axiz-glm-ocr:local
+    build:
+      context: ..
+      dockerfile: infrastructure/Dockerfile.glm-ocr
+    container_name: axiz-rag-glm-ocr
+    env_file:
+      - path: ../.env
+        required: false
+    command:
+      - --model
+      - zai-org/GLM-OCR
+      - --served-model-name
+      - glm-ocr
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --max-model-len
+      - "16384"
+      - --gpu-memory-utilization
+      - "0.75"
+    gpus: all
+    ipc: host
+    ports:
+      - "8080:8080"
+    volumes:
+      - hf_cache_data:/root/.cache
+      - vllm_cache_data:/root/.cache/vllm
+    networks:
+      - axiz-rag
+    restart: unless-stopped
+
   raglight-service:
     image: axiz-raglight-service:local
     env_file:
@@ -78,6 +112,13 @@ services:
       HUGGINGFACE_HUB_CACHE: /app/.cache/huggingface/hub
       SENTENCE_TRANSFORMERS_HOME: /app/.cache/sentence-transformers
       FASTEMBED_CACHE_PATH: /app/.cache/fastembed
+      GLM_OCR_MODE: selfhosted
+      GLM_OCR_API_URL: http://glm-ocr:8080/v1/chat/completions
+      GLM_OCR_MODEL: glm-ocr
+      GLM_OCR_LAYOUT_DEVICE: cpu
+      GLM_OCR_MAX_WORKERS: "4"
+      GLM_OCR_REQUEST_TIMEOUT_SECONDS: "300"
+      OCR_POLICY: auto
     ports:
       - "8000:8000"
     volumes:
@@ -87,6 +128,7 @@ services:
       - qdrant
       - memgraph
       - raglight-service
+      - glm-ocr
     networks:
       - axiz-rag
     restart: unless-stopped
@@ -136,3 +178,4 @@ volumes:
   memgraph_data:
   runtime_data:
   hf_cache_data:
+  vllm_cache_data:

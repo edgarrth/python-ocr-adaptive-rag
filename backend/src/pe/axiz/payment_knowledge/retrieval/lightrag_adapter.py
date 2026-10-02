@@ -6,6 +6,7 @@ from typing import Any
 
 from pe.axiz.payment_knowledge.config import Settings
 from pe.axiz.payment_knowledge.domain.models import ContextItem
+from pe.axiz.payment_knowledge.retrieval.source_attribution import parse_lightrag_context
 
 
 class LightRagAdapter:
@@ -43,20 +44,42 @@ class LightRagAdapter:
         from lightrag import QueryParam
 
         rag = await self._get_rag()
-        result = await rag.aquery(question, param=QueryParam(mode="hybrid", only_need_context=True, top_k=top_k))
+        result = await rag.aquery(
+            question,
+            param=QueryParam(mode="hybrid", only_need_context=True, top_k=top_k),
+        )
         content = getattr(result, "content", None)
         text = content if content is not None else (result if isinstance(result, str) else str(result))
+
+        attributed = parse_lightrag_context(str(text), self.canonical_dir, top_k)
+        if attributed:
+            return [
+                ContextItem(
+                    id=str(item["id"]),
+                    document_id=str(item["document_id"]),
+                    source=str(item["source"]),
+                    title=str(item["title"]),
+                    text=str(item["text"]),
+                    score=float(item["score"]),
+                    strategy="lightrag",
+                    entities=[],
+                    metadata=dict(item["metadata"]),
+                )
+                for item in attributed
+            ]
+
+        # Fallback conservador para versiones de LightRAG cuyo formato de contexto cambie.
         return [
             ContextItem(
                 id="lightrag-context",
                 document_id="",
                 source="LightRAG",
                 title="Contexto híbrido de LightRAG",
-                text=text,
+                text=str(text),
                 score=1.0,
                 strategy="lightrag",
                 entities=[],
-                metadata={"mode": "hybrid"},
+                metadata={"mode": "hybrid", "source_attribution": "unavailable"},
             )
         ]
 
@@ -75,7 +98,12 @@ class LightRagAdapter:
 
         self.settings.lightrag_workdir.mkdir(parents=True, exist_ok=True)
 
-        async def llm_func(prompt: str, system_prompt: str | None = None, history_messages: list | None = None, **kwargs: Any) -> str:
+        async def llm_func(
+            prompt: str,
+            system_prompt: str | None = None,
+            history_messages: list | None = None,
+            **kwargs: Any,
+        ) -> str:
             return await openai_complete_if_cache(
                 self.settings.openai_model,
                 prompt,

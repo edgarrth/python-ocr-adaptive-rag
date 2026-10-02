@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 
 from neo4j import GraphDatabase
 
@@ -130,18 +131,36 @@ class MemgraphStore:
             return [self._context(record) for record in fallback]
 
     def neighborhood(self, entity: str, limit: int = 20) -> dict[str, list[dict[str, object]]]:
+        """Expande vecinos con matching tolerante a mayúsculas y acentos."""
+        normalized_query = self._normalize_search_text(entity)
         with self.driver.session() as session:
+            candidates = session.run("MATCH (e:Entity) RETURN e.name AS name")
+            matched_names = [
+                str(record["name"])
+                for record in candidates
+                if normalized_query in self._normalize_search_text(str(record["name"]))
+            ]
+            if not matched_names:
+                return {"edges": []}
+
             records = session.run(
                 """
                 MATCH (a:Entity)-[r:CO_OCCURS]-(b:Entity)
-                WHERE toLower(a.name) CONTAINS toLower($entity)
+                WHERE a.name IN $entities
                 RETURN a.name AS source, b.name AS target, count(r) AS weight
                 ORDER BY weight DESC LIMIT $limit
                 """,
-                entity=entity,
+                entities=matched_names,
                 limit=limit,
             )
             return {"edges": [dict(record) for record in records]}
+
+    @staticmethod
+    def _normalize_search_text(value: str) -> str:
+        decomposed = unicodedata.normalize("NFKD", value)
+        return "".join(
+            char for char in decomposed.lower() if not unicodedata.combining(char)
+        ).strip()
 
     @staticmethod
     def _context(record: object) -> ContextItem:

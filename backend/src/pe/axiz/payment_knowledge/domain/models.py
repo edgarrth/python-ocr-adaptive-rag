@@ -7,6 +7,12 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 
+class OcrPolicy(StrEnum):
+    AUTO = "auto"
+    GLM = "glm"
+    DOCLING = "docling"
+
+
 class RetrievalStrategy(StrEnum):
     AUTO = "auto"
     NATIVE_RAG = "native_rag"
@@ -73,6 +79,7 @@ class HealthResponse(BaseModel):
     memgraph: bool
     raglight: bool
     lightrag: bool
+    glm_ocr: bool
     hf_token_configured: bool
 
 

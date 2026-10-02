@@ -20,3 +20,9 @@ def test_cors_origins_accepts_json_array() -> None:
 def test_hf_token_se_lee_como_setting() -> None:
     settings = Settings(hf_token="hf_test")
     assert settings.hf_token == "hf_test"
+
+
+def test_glm_ocr_selfhosted_es_default() -> None:
+    settings = Settings()
+    assert settings.glm_ocr_mode == "selfhosted"
+    assert settings.ocr_policy == "auto"

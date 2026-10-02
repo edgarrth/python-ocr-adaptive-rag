@@ -1,0 +1,11 @@
+# syntax=docker/dockerfile:1.7
+
+FROM vllm/vllm-openai:v0.19.0-ubuntu2404
+
+# La imagen oficial vLLM expone Python como `python3` (no garantiza el alias
+# `python`). GLM-OCR requiere Transformers >= 5.3.0 para el serving local.
+# Se mantiene vLLM 0.19.0 porque es la combinación documentada oficialmente
+# por GLM-OCR y, además, permite reutilizar la imagen base ya descargada.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python3 -m pip install --upgrade "transformers==5.3.0" \
+    && python3 -c "import sys, transformers, vllm; print('GLM-OCR runtime:', {'python': sys.version.split()[0], 'transformers': transformers.__version__, 'vllm': vllm.__version__})"

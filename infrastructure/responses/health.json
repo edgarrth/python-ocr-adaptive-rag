@@ -3,5 +3,7 @@
   "qdrant": true,
   "memgraph": true,
   "raglight": true,
-  "lightrag": false
+  "lightrag": true,
+  "glm_ocr": true,
+  "hf_token_configured": true
 }

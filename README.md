@@ -4,6 +4,9 @@ Esta PoC prueba una arquitectura de conocimiento documental para payment process
 
 La aplicación procesa documentos con Docling, usa GLM-OCR como ruta OCR cuando el contenido viene escaneado o la extracción normal no alcanza un mínimo de texto, construye una representación vectorial en Qdrant y un grafo de conocimiento en Memgraph, y expone cinco estrategias de recuperación: Native RAG, Hybrid RAG, RAGLight, GraphRAG y LightRAG. En modo `auto`, un router decide entre recuperación semántica, híbrida o GraphRAG según señales observables de la consulta. RAGLight corre en un servicio Python separado para aislar su árbol de dependencias del backend principal y poder mantener Docling y RAGLight en versiones actuales sin forzar paquetes incompatibles en el mismo entorno.
 
+
+> Versión v13: corrige la atribución de fuentes en RAGLight y LightRAG para que Hit Rate/MRR midan documentos reales, elimina el `temperature` forzado en la síntesis OpenAI-compatible y hace que la exploración de vecindad de Memgraph tolere mayúsculas y acentos.
+
 La interfaz está hecha en Angular tomando como base visual el proyecto de ejemplo: navegación a la izquierda, conversación al centro y configuración/evaluación a la derecha. La adapté para carga documental, selección de estrategia, evidencia recuperada, trazabilidad técnica, evaluación y exploración del grafo.
 
 ## Qué quiero demostrar con esta PoC
@@ -209,22 +212,37 @@ Si el endpoint local requiere un token aunque no lo valide, se puede colocar un 
 
 ## GLM-OCR
 
-El modo por defecto usa MaaS:
+La PoC usa GLM-OCR **self-hosted por defecto**. No necesito saldo ni `ZHIPU_API_KEY`: Docker Compose levanta un servicio `glm-ocr` basado en vLLM y el modelo `zai-org/GLM-OCR`. El backend mantiene el pipeline completo del SDK `glmocr[selfhosted]` y usa la GPU solo para la inferencia del modelo; el detector de layout se deja en CPU para reservar VRAM.
 
-```env
-GLM_OCR_MODE=maas
-ZHIPU_API_KEY=...
-```
-
-También queda preparado para un endpoint self-hosted:
+Configuración usada dentro de Docker:
 
 ```env
 GLM_OCR_MODE=selfhosted
-GLM_OCR_API_URL=http://localhost:5002/v1/chat/completions
+GLM_OCR_API_URL=http://glm-ocr:8080/v1/chat/completions
+GLM_OCR_MODEL=glm-ocr
+GLM_OCR_LAYOUT_DEVICE=cpu
+GLM_OCR_MAX_WORKERS=4
+GLM_OCR_REQUEST_TIMEOUT_SECONDS=300
+OCR_POLICY=auto
 ZHIPU_API_KEY=
 ```
 
-Los documentos digitales que Docling procesa correctamente no necesitan GLM-OCR. El OCR solo entra cuando corresponde, para evitar costo y latencia innecesarios.
+La política OCR puede elegirse por request:
+
+```text
+auto     imágenes -> GLM-OCR; PDF -> Docling y fallback a GLM-OCR si el texto es insuficiente
+glm      fuerza GLM-OCR y omite Docling
+docling  fuerza Docling y no llama a GLM-OCR
+```
+
+Ejemplo para forzar GLM-OCR sobre un PDF escaneado:
+
+```bash
+curl -X POST "http://localhost:8000/api/v1/documents/ingest?ocr=glm" \
+  -F "file=@datasets/ocr_samples/documento_escaneado_prueba_ocr_pagos.pdf"
+```
+
+El contenedor usa la imagen oficial de vLLM `v0.19.0-ubuntu2404`, con `transformers>=5.3.0`, tal como requiere la guía de despliegue de GLM-OCR. La imagen de vLLM expone el intérprete como `python3`, por lo que `Dockerfile.glm-ocr` instala/valida `transformers==5.3.0` con `python3 -m pip`; no depende del alias `python`. Se limita el contexto a 16384, la concurrencia OCR a 4 workers y la utilización de VRAM a `0.75` para una PoC de baja concurrencia.
 
 ## Estructura del proyecto
 
@@ -249,10 +267,15 @@ Los documentos digitales que Docling procesa correctamente no necesitan GLM-OCR.
 │   └── tests/                pruebas del servicio aislado
 ├── datasets/
 │   ├── sample_documents/     corpus de payment processing
+│   ├── ocr_samples/          PDF/JPG escaneados para validar GLM-OCR local
 │   ├── evaluation/           preguntas y fuentes esperadas
 │   └── seed.py               carga del dataset usando la API
 ├── scripts/
 │   └── verify.py             validaciones reproducibles
+├── infrastructure/
+│   ├── Dockerfile.ai         base reusable para backend y RAGLight
+│   ├── Dockerfile.glm-ocr    extensión de vLLM para GLM-OCR local
+│   └── docker-compose.yml    stack completo
 ├── frontend/                 Angular, basado visualmente en la interfaz de referencia
 │   ├── Dockerfile             build con imagen oficial de Node, sin Conda
 │   └── proxy.conf.json       proxy local /api hacia FastAPI
@@ -294,9 +317,9 @@ Los puntos que conviene revisar primero son:
 
 | Orden | Método y endpoint | Uso funcional | Qué hace técnicamente |
 | ---: | --- | --- | --- |
-| 1 | `GET /api/v1/health` | verificar que la PoC está lista | prueba conectividad con Qdrant y Memgraph e informa disponibilidad de RAGLight/LightRAG |
+| 1 | `GET /api/v1/health` | verificar que la PoC está lista | prueba Qdrant, Memgraph, RAGLight, LightRAG y el servicio local GLM-OCR |
 | 2 | `POST /api/v1/datasets/seed` | cargar el dataset de ejemplo | recorre `datasets/sample_documents`, procesa, fragmenta e indexa en los motores habilitados |
-| 2b | `POST /api/v1/documents/ingest` | cargar un documento propio | multipart upload -> Docling/GLM-OCR -> chunks -> Qdrant/Memgraph/RAGLight/LightRAG |
+| 2b | `POST /api/v1/documents/ingest?ocr=auto|glm|docling` | cargar un documento propio | multipart upload -> política OCR -> chunks -> Qdrant/Memgraph/RAGLight/LightRAG |
 | 3 | `POST /api/v1/query` | consultar conocimiento | ejecuta estrategia solicitada o router `auto`, recupera evidencia y genera respuesta |
 | 4 | `GET /api/v1/graph/neighborhood/{entity}` | revisar relaciones | consulta relaciones `CO_OCCURS` en Memgraph |
 | 5 | `POST /api/v1/evaluations/run` | comparar motores | ejecuta retrieval contra el set de evaluación y calcula Hit Rate, MRR y latencia |
@@ -316,11 +339,11 @@ El servicio RAGLight expone cinco endpoints internos. El frontend no los consume
 
 ## Variables del `.env` en Docker
 
-El archivo `.env` está en la raíz del proyecto, mientras que el Compose vive en `infrastructure/`. Como se ejecuta con `-f infrastructure/docker-compose.yml`, Docker Compose considera `infrastructure/` como directorio del proyecto para la interpolación automática. Para evitar que un `HF_TOKEN`, `OPENAI_API_KEY`, `ZHIPU_API_KEY` u otra variable del `.env` raíz quede fuera de los contenedores, esta versión declara `env_file: ../.env` explícitamente en `backend` y `raglight-service`.
+El archivo `.env` está en la raíz del proyecto, mientras que el Compose vive en `infrastructure/`. Como se ejecuta con `-f infrastructure/docker-compose.yml`, Docker Compose considera `infrastructure/` como directorio del proyecto para la interpolación automática. Para evitar que un `HF_TOKEN`, `OPENAI_API_KEY` u otra variable del `.env` raíz quede fuera de los contenedores, esta versión declara `env_file: ../.env` explícitamente en `backend`, `raglight-service` y `glm-ocr`.
 
 Las URLs que cambian dentro de Docker (`QDRANT_URL`, `MEMGRAPH_URI`, `RAGLIGHT_SERVICE_URL`, `LIGHTRAG_WORKDIR` y `DATASETS_DIR`) se sobrescriben después con valores internos de la red Compose. Las credenciales y switches del `.env` no se pisan con valores vacíos.
 
-Además, backend y RAGLight comparten un volumen de cache de Hugging Face y usan `HF_HOME`, `HUGGINGFACE_HUB_CACHE` y `SENTENCE_TRANSFORMERS_HOME`. El token nunca se imprime; los endpoints de salud solo muestran `hf_token_configured=true/false`.
+Además, backend, RAGLight y GLM-OCR comparten un volumen de cache de Hugging Face y usan `HF_HOME`, `HUGGINGFACE_HUB_CACHE` y `SENTENCE_TRANSFORMERS_HOME`. El token nunca se imprime; los endpoints de salud solo muestran `hf_token_configured=true/false`.
 
 Para confirmar que el token llegó al contenedor sin mostrarlo:
 
@@ -343,18 +366,18 @@ RAGLight incorpora además `GET /ready`: inicializa el modelo de embeddings y Qd
 
 Hay dos formas de ejecutar la PoC. La recomendada es Docker porque deja listo el stack completo y también precarga el dataset. Conda queda como alternativa para desarrollo local.
 
-Para Docker solo necesito:
+Para Docker necesito:
 
 - Docker Engine o Docker Desktop con Compose v2;
-- 6 GB de RAM libres como punto de partida. Docling y los modelos locales pueden pedir más durante la primera ejecución.
+- una GPU NVIDIA visible desde Docker (`nvidia-smi` en WSL/Linux y soporte `--gpus all`);
+- aproximadamente 8 GB de VRAM como referencia práctica para GLM-OCR 0.9B en esta PoC;
+- 16 GB de RAM del sistema como mínimo razonable y 32 GB recomendados para ejecutar todo el stack con margen.
+
+El primer arranque descarga los pesos de GLM-OCR desde Hugging Face y puede tardar varios minutos. Los pesos y la caché de compilación de vLLM quedan persistidos en volúmenes Docker.
 
 Para desarrollo local necesito además una distribución Conda, por ejemplo Miniconda o Miniforge. No uso `venv` y no hay pasos manuales de `pip install`. Python y Node salen del entorno Conda.
 
-El flujo base no necesita credenciales. Solo hacen falta cuando quiero usar:
-
-- GLM-OCR MaaS sobre documentos escaneados;
-- LightRAG, porque necesita LLM y embeddings para construir su grafo;
-- síntesis generativa con `LLM_PROVIDER=openai`.
+GLM-OCR local no necesita ninguna credencial de Zhipu. Las credenciales externas solo hacen falta para LightRAG y para síntesis generativa cuando uso el adapter OpenAI-compatible.
 
 ## Ejecución recomendada: todo con Docker
 
@@ -363,6 +386,8 @@ Desde la raíz del proyecto:
 ```bash
 docker compose -f infrastructure/docker-compose.yml up --build
 ```
+
+Ese comando es suficiente para la ejecución Docker completa: levanta la infraestructura, backend y RAGLight, ejecuta `dataset-seed` automáticamente y arranca el frontend cuando el seed termina con código 0. No hace falta ejecutar manualmente `POST /api/v1/datasets/seed`; hacerlo de nuevo vuelve a procesar el corpus y, con LightRAG habilitado, repite llamadas al proveedor LLM/embeddings. Los `curl` siguientes son verificaciones funcionales, no pasos adicionales de arranque.
 
 Ese único comando hace el bootstrap completo:
 
@@ -453,9 +478,14 @@ Para Docker, Compose usa las variables del `.env` ubicado en la raíz. Las direc
 | `OPENAI_MODEL` | Solo con `LLM_PROVIDER=openai` o LightRAG | modelo generativo | nombre soportado por el proveedor |
 | `OPENAI_EMBEDDING_MODEL` | Para LightRAG | embeddings de LightRAG | nombre soportado por el proveedor |
 | `OPENAI_EMBEDDING_DIMENSION` | Para LightRAG | dimensión que debe coincidir con el embedding elegido | documentación del modelo de embeddings |
-| `ZHIPU_API_KEY` | Solo para GLM-OCR en modo MaaS | autenticación contra el servicio GLM-OCR de Zhipu/Z.ai | consola BigModel: `https://www.bigmodel.cn/usercenter/proj-mgmt/apikeys` |
-| `GLM_OCR_MODE` | Solo si quiero cambiar el modo | `maas` usa la nube; `selfhosted` usa un endpoint propio | `maas` o `selfhosted` |
-| `GLM_OCR_API_URL` | No en MaaS | URL del servidor GLM-OCR self-hosted/OpenAI-compatible | URL de mi despliegue propio |
+| `GLM_OCR_MODE` | No en Docker | modo del SDK; Compose fuerza `selfhosted` | `selfhosted` |
+| `GLM_OCR_API_URL` | No en Docker | endpoint OpenAI-compatible del contenedor vLLM | `http://glm-ocr:8080/v1/chat/completions` |
+| `GLM_OCR_MODEL` | No en Docker | nombre servido por vLLM | `glm-ocr` |
+| `GLM_OCR_LAYOUT_DEVICE` | No en Docker | dispositivo del detector de layout del SDK | `cpu` |
+| `GLM_OCR_MAX_WORKERS` | No en Docker | concurrencia máxima del pipeline OCR | `4` |
+| `GLM_OCR_REQUEST_TIMEOUT_SECONDS` | No en Docker | timeout por llamada al modelo self-hosted | `300` |
+| `OCR_POLICY` | No | política por defecto de ingesta | `auto`, `glm` o `docling` |
+| `ZHIPU_API_KEY` | No | queda solo por compatibilidad si manualmente vuelvo a MaaS | vacío en esta PoC |
 | `RAGLIGHT_ENABLED` | No | habilita el flujo RAGLight | `true`/`false`; no necesita token |
 | `RAGLIGHT_SERVICE_URL` | No | URL del servicio aislado RAGLight | local: `http://localhost:8010`; Docker la sobrescribe a `http://raglight-service:8010` |
 | `RAGLIGHT_TIMEOUT_SECONDS` | No | timeout de indexación/búsqueda RAGLight | `600` por defecto |
@@ -467,24 +497,28 @@ Para Docker, Compose usa las variables del `.env` ubicado en la raíz. Las direc
 
 Docling no requiere API key. RAGLight tampoco requiere API key en esta PoC porque usa embeddings públicos/Hugging Face y Qdrant local. `HF_TOKEN` es opcional: sin él la descarga funciona de forma anónima, pero Hugging Face puede mostrar un warning y aplicar límites más bajos. Qdrant y Memgraph tampoco necesitan tokens con la configuración del Compose.
 
-GLM-OCR solo necesita `ZHIPU_API_KEY` cuando el documento cae en la ruta OCR y `GLM_OCR_MODE=maas`. Los `.md` del dataset inicial no usan OCR, por eso el bootstrap puede terminar sin esa clave.
+GLM-OCR está incorporado al Compose y no usa `ZHIPU_API_KEY`. `HF_TOKEN` sigue siendo opcional, aunque ayuda a evitar límites anónimos al descargar los pesos desde Hugging Face.
 
-LightRAG es distinto: para construir su grafo necesita un LLM y embeddings. El adapter incluido usa un endpoint OpenAI-compatible, por lo que si dejo `OPENAI_API_KEY` vacío, LightRAG queda reportado como no disponible pero no bloquea Native RAG, Hybrid RAG, RAGLight ni GraphRAG.
-
-### Ejemplo mínimo sin tokens
+### Ejemplo mínimo
 
 ```env
 LLM_PROVIDER=extractive
 RAGLIGHT_ENABLED=true
 LIGHTRAG_ENABLED=true
-GLM_OCR_MODE=maas
+GLM_OCR_MODE=selfhosted
+GLM_OCR_API_URL=http://localhost:8080/v1/chat/completions
+GLM_OCR_MODEL=glm-ocr
+GLM_OCR_LAYOUT_DEVICE=cpu
+GLM_OCR_MAX_WORKERS=4
+GLM_OCR_REQUEST_TIMEOUT_SECONDS=300
+OCR_POLICY=auto
 ZHIPU_API_KEY=
 OPENAI_API_KEY=
 ```
 
-Con esta configuración el stack levanta y precarga el dataset textual. LightRAG queda inactivo hasta que tenga credenciales, y GLM-OCR solo fallaría si intento cargar un documento que realmente necesite OCR.
+Con esta configuración el OCR funciona localmente. LightRAG queda inactivo si no configuro el proveedor OpenAI-compatible; Native RAG, Hybrid RAG, RAGLight, GraphRAG, Adaptive Routing, Docling y GLM-OCR siguen disponibles.
 
-### Ejemplo con todas las rutas cloud habilitadas
+### Ejemplo con generación y LightRAG habilitados
 
 ```env
 LLM_PROVIDER=openai
@@ -494,31 +528,23 @@ OPENAI_MODEL=gpt-5-mini
 OPENAI_EMBEDDING_MODEL=text-embedding-3-small
 OPENAI_EMBEDDING_DIMENSION=1536
 
-GLM_OCR_MODE=maas
-GLM_OCR_API_URL=
-ZHIPU_API_KEY=sk-zhipu-ejemplo-reemplazar
+GLM_OCR_MODE=selfhosted
+GLM_OCR_API_URL=http://localhost:8080/v1/chat/completions
+GLM_OCR_MODEL=glm-ocr
+GLM_OCR_LAYOUT_DEVICE=cpu
+GLM_OCR_MAX_WORKERS=4
+GLM_OCR_REQUEST_TIMEOUT_SECONDS=300
+OCR_POLICY=auto
 
 RAGLIGHT_ENABLED=true
 LIGHTRAG_ENABLED=true
 ```
 
-Los valores con `ejemplo-reemplazar` son solo placeholders. No se deben commitear claves reales; `.env` está ignorado por Git.
-
-### Ejemplo de GLM-OCR self-hosted
-
-Si ya tengo un servidor GLM-OCR propio con API OpenAI-compatible:
-
-```env
-GLM_OCR_MODE=selfhosted
-GLM_OCR_API_URL=http://localhost:5002/v1/chat/completions
-ZHIPU_API_KEY=
-```
-
-En Docker, `localhost` dentro del backend apunta al mismo contenedor. Si el OCR self-hosted corre fuera del stack, debo usar un hostname accesible desde la red Docker o incorporarlo como otro servicio explícito.
+Los valores `sk-ejemplo-reemplazar` son placeholders y no se deben commitear.
 
 ## Ejecución local con Conda
 
-Esta ruta sirve cuando quiero depurar desde el IDE. Como Docling y RAGLight tienen un conflicto real de `typer`, uso dos environments Conda separados. No creo `.venv` y no hago instalaciones manuales fuera de los archivos `environment.yml`.
+Esta ruta sirve cuando quiero depurar desde el IDE. Como Docling y RAGLight tienen un conflicto real de `typer`, uso dos environments Conda separados. No creo `.venv` y no hago instalaciones manuales fuera de los archivos `environment.yml`. Para probar GLM-OCR desde el backend local puedo dejar levantado solo el servicio Docker `glm-ocr` en el puerto 8080; el `.env.example` apunta a `localhost:8080` y Compose sobrescribe esa URL cuando todo corre dentro de la red Docker.
 
 ### 1. Crear el entorno principal
 
@@ -743,6 +769,8 @@ Fuerza la fusión entre evidencia de Memgraph e Hybrid RAG.
 curl "http://localhost:8000/api/v1/graph/neighborhood/AUTORIZACION"
 ```
 
+La búsqueda de entidad normaliza mayúsculas y acentos, por lo que `AUTORIZACION`, `autorización` y `Autorización` se comparan de forma equivalente contra los nombres de entidad existentes.
+
 Devuelve las entidades que comparten chunks con la entidad consultada y el peso basado en cantidad de chunks compartidos.
 
 ### Prueba 9: LightRAG
@@ -771,18 +799,48 @@ curl -X POST http://localhost:8000/api/v1/evaluations/run \
   --data-binary @infrastructure/requests/evaluation.json
 ```
 
-Ejecuta el mismo set contra Native RAG, Hybrid RAG, RAGLight, GraphRAG y LightRAG. Si un motor no está disponible, la corrida no se corta: sus casos quedan con `success=false` y la suma aparece en `failed_cases`.
+Ejecuta el mismo set contra Native RAG, Hybrid RAG, RAGLight, GraphRAG y LightRAG. Si un motor no está disponible, la corrida no se corta: sus casos quedan con `success=false` y la suma aparece en `failed_cases`. RAGLight y LightRAG exponen ahora el nombre real del documento recuperado (`authorization_codes.md`, `reconciliation.md`, etc.) en lugar de devolver únicamente `raglight` o `LightRAG`; de esta forma `Hit Rate` y `MRR` miden retrieval real y no el nombre del framework.
 
 ## Probar GLM-OCR
 
-El dataset incluido es textual para que la PoC funcione sin claves externas. Para probar OCR, usar un PDF escaneado o una imagen:
+Incluyo un PDF y un JPG escaneados en `datasets/ocr_samples/`. La prueba recomendada fuerza GLM-OCR para que Docling no pueda resolver el documento antes:
 
 ```bash
-curl -X POST http://localhost:8000/api/v1/documents/ingest \
-  -F "file=@./mi-documento-escaneado.pdf"
+curl -X POST "http://localhost:8000/api/v1/documents/ingest?ocr=glm" \
+  -F "file=@datasets/ocr_samples/documento_escaneado_prueba_ocr_pagos.pdf"
 ```
 
-En MaaS debe estar definido `ZHIPU_API_KEY`. La respuesta de ingesta indica `ocr_used=true` cuando entró la ruta GLM-OCR.
+La respuesta debe incluir:
+
+```json
+{
+  "processor": "glm-ocr",
+  "ocr_used": true,
+  "raglight_indexed": true,
+  "lightrag_indexed": true
+}
+```
+
+También puedo comparar el mismo archivo con Docling:
+
+```bash
+curl -X POST "http://localhost:8000/api/v1/documents/ingest?ocr=docling" \
+  -F "file=@datasets/ocr_samples/documento_escaneado_prueba_ocr_pagos.pdf"
+```
+
+`ocr=auto` mantiene el comportamiento de producción: imágenes van directo a GLM-OCR; los PDF digitales pasan primero por Docling y usan GLM-OCR solo si la extracción queda por debajo de `OCR_MIN_TEXT_CHARS`.
+
+Para comprobar el modelo vLLM directamente:
+
+```bash
+curl http://localhost:8080/v1/models
+```
+
+Y el health del backend ahora debe mostrar `"glm_ocr": true`:
+
+```bash
+curl http://localhost:8000/api/v1/health
+```
 
 ## Evaluación incluida
 
@@ -792,6 +850,8 @@ En MaaS debe estar definido `ZHIPU_API_KEY`. La respuesta de ingesta indica `ocr
 - `mrr`: qué tan arriba aparece la primera fuente esperada;
 - `avg_latency_ms`: tiempo promedio del retrieval;
 - `successful_cases` y `failed_cases`: permite comparar sin ocultar que un motor estaba deshabilitado o mal configurado.
+
+Para RAGLight, cuando el framework no entrega `source` en su metadata, el adapter atribuye cada resultado comparando el texto recuperado contra los Markdown canónicos y deja el método/score en `metadata.source_attribution`. Para LightRAG se interpreta `Reference Document List` y los `reference_id` del contexto generado por el SDK, conservando el orden de ranking que devolvió LightRAG. Si el formato cambia, se conserva un fallback explícito en vez de inventar una fuente.
 
 Para una evaluación más seria se puede ampliar el dataset sin cambiar el código del servicio.
 
@@ -835,30 +895,32 @@ conda run -n axiz-adaptive-rag-payments npm --prefix frontend run build
 Antes de empaquetar esta versión validé:
 
 - `compileall` del backend, dataset y servicio RAGLight;
-- `8 passed` en `backend/tests`;
-- `2 passed` en `raglight_service/tests`;
-- construcción del wheel del backend sin instalar dependencias;
-- construcción del wheel del servicio RAGLight sin instalar dependencias;
-- sintaxis YAML de `environment.yml`, `raglight_service/environment.yml` e `infrastructure/docker-compose.yml`;
-- que `backend` y `dataset-seed` resuelvan al mismo `image` + `build`;
-- que el `pyproject.toml` del backend principal ya no contenga `raglight`.
+- `28 passed` en `backend/tests`, incluyendo política OCR `auto/glm/docling` y URL self-hosted;
+- `8 passed` en `raglight_service/tests`;
+- regresión de atribución de fuentes RAGLight/LightRAG;
+- regresión de generación OpenAI-compatible sin `temperature` forzado;
+- normalización de mayúsculas/acentos para `graph/neighborhood`;
+- sintaxis YAML/TOML y resolución de servicios del Compose;
+- construcción de wheels del backend y RAGLight sin instalar dependencias;
+- integridad del ZIP final.
 
-El entorno usado para preparar el ZIP no tiene Docker ni Conda y tampoco tiene salida de red desde `pip`, así que no registro una ejecución de `docker compose up --build` ni una resolución online completa que no pude hacer. El conflicto concreto de la ejecución anterior queda eliminado por diseño: Docling y RAGLight ya no comparten el mismo environment Python.
+El entorno usado para preparar el ZIP no tiene runtime Docker/NVIDIA, por lo que la ejecución real del nuevo contenedor vLLM debe validarse en la máquina destino. El Compose sigue la receta oficial de GLM-OCR/vLLM: modelo `zai-org/GLM-OCR`, vLLM 0.19.0, Transformers 5.3.0 y API OpenAI-compatible. En la v15 se corrigió específicamente el build de `Dockerfile.glm-ocr`: la imagen oficial no garantiza el comando `python`, pero sí `python3`, de modo que la capa usa `python3 -m pip` y valida en build las versiones efectivas de Python, Transformers y vLLM.
 
 ## Decisiones de alcance
 
-- Qdrant y Memgraph son los únicos contenedores de infraestructura porque son los únicos necesarios para este caso.
+- Qdrant y Memgraph son los únicos stores de infraestructura. GLM-OCR y RAGLight son servicios de aplicación especializados que se ejecutan en contenedores separados por compatibilidad y aislamiento.
 - RAGLight reutiliza Qdrant pero corre en un servicio Python separado y usa una colección distinta para que la comparación no mezcle índices ni árboles de dependencias.
 - GraphRAG es una implementación propia sobre Memgraph y Hybrid RAG; LightRAG se mantiene como flujo alterno para comparación.
 - La generación se desacopla del retrieval. Esto permite medir retrieval sin que una respuesta de LLM cambie el resultado de Hit Rate o MRR.
 - El modo `auto` no selecciona RAGLight/LightRAG para evitar que el comportamiento base dependa de frameworks o credenciales externas. Esos motores se pueden forzar desde API/UI y se incluyen en evaluación.
 - No se agregó un broker, una base relacional o una base documental porque no hay un requisito del caso que lo justifique.
+- GLM-OCR usa un contenedor vLLM dedicado con GPU y persistencia de caché; el pipeline/layout sigue en el backend y corre en CPU.
 
 ## Optimización del build Docker para dependencias de IA
 
-Docling y RAGLight terminan usando PyTorch. Si se deja que `pip` resuelva PyTorch desde el índice general de PyPI en Linux, puede descargar además paquetes CUDA/NVIDIA de varios gigabytes aunque esta PoC se ejecute en CPU. Eso hace que el primer `docker compose up --build` tarde demasiado.
+Docling, el pipeline self-hosted de GLM-OCR y RAGLight terminan usando PyTorch. Si se deja que `pip` resuelva PyTorch desde el índice general de PyPI en Linux, puede descargar además paquetes CUDA/NVIDIA de varios gigabytes aunque esta PoC se ejecute en CPU. Eso hace que el primer `docker compose up --build` tarde demasiado.
 
-La imagen se construye ahora desde `infrastructure/Dockerfile.ai` y tiene una etapa base compartida por `backend` y `raglight-service`. Esa etapa instala explícitamente la distribución CPU de PyTorch desde el índice oficial de PyTorch. BuildKit también mantiene una caché de descargas de `pip`, por lo que las reconstrucciones posteriores no deberían repetir las descargas grandes si las dependencias no cambian.
+Backend y RAGLight se construyen desde `infrastructure/Dockerfile.ai` con una etapa CPU compartida que instala explícitamente PyTorch CPU. GLM-OCR usa `infrastructure/Dockerfile.glm-ocr`, basado en la imagen oficial GPU de vLLM, y se mantiene separado para no contaminar el backend con CUDA. BuildKit mantiene caché de `pip`, y Docker reutiliza las capas de la imagen vLLM ya descargadas; por eso, después de una descarga inicial completa, una corrección en la capa final de `Dockerfile.glm-ocr` no debería volver a descargar los varios GB de la imagen base salvo que se haya limpiado la caché local.
 
 No se usa Conda dentro de Docker. Conda queda únicamente para trabajar localmente desde el IDE.
 
@@ -867,7 +929,7 @@ El primer build seguirá siendo más pesado que un servicio web normal porque Do
 Para ver el detalle de lo que Docker está descargando o instalando:
 
 ```bash
-BUILDKIT_PROGRESS=plain docker compose -f infrastructure/docker-compose.yml build backend raglight-service
+BUILDKIT_PROGRESS=plain docker compose -f infrastructure/docker-compose.yml build backend raglight-service glm-ocr
 ```
 
 Después se levanta todo normalmente:
@@ -877,6 +939,22 @@ docker compose -f infrastructure/docker-compose.yml up --build
 ```
 
 
+
+### Error `python: not found` al construir GLM-OCR
+
+La imagen `vllm/vllm-openai:v0.19.0-ubuntu2404` no garantiza el alias `python`; el intérprete disponible es `python3`. Si aparece:
+
+```text
+/bin/sh: 1: python: not found
+```
+
+la v15 ya lo corrige usando:
+
+```dockerfile
+RUN python3 -m pip install --upgrade "transformers==5.3.0"
+```
+
+Además, la misma capa hace un import de `transformers` y `vllm` y muestra sus versiones durante el build. Si la imagen base ya terminó de descargarse en un intento anterior, Docker debería reutilizarla.
 
 ### Compatibilidad Qdrant y RAGLight
 

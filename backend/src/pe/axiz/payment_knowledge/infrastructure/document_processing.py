@@ -4,9 +4,12 @@ import hashlib
 import re
 import uuid
 from pathlib import Path
+from urllib.parse import urlparse
+
+import httpx
 
 from pe.axiz.payment_knowledge.config import Settings
-from pe.axiz.payment_knowledge.domain.models import DocumentChunk, ParsedDocument
+from pe.axiz.payment_knowledge.domain.models import DocumentChunk, OcrPolicy, ParsedDocument
 
 
 def canonical_markdown_name(document_id: str, source_name: str) -> str:
@@ -15,22 +18,65 @@ def canonical_markdown_name(document_id: str, source_name: str) -> str:
 
 
 class GlmOcrAdapter:
-    """Encapsula GLM-OCR para documentos escaneados o imágenes."""
+    """Encapsula GLM-OCR MaaS o self-hosted con errores observables."""
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
 
+    def ping(self) -> bool:
+        mode = self.settings.glm_ocr_mode.lower()
+        if mode == "maas":
+            return bool(self.settings.zhipu_api_key.strip())
+        try:
+            endpoint = self._selfhosted_models_url()
+            response = httpx.get(endpoint, timeout=3.0)
+            return response.status_code == 200
+        except Exception:
+            return False
+
     def parse(self, path: Path) -> str:
-        if self.settings.glm_ocr_mode.lower() == "maas" and not self.settings.zhipu_api_key:
+        mode = self.settings.glm_ocr_mode.lower()
+        if mode not in {"maas", "selfhosted"}:
+            raise RuntimeError(f"GLM_OCR_MODE no soportado: {self.settings.glm_ocr_mode}")
+        if mode == "maas" and not self.settings.zhipu_api_key:
             raise RuntimeError("ZHIPU_API_KEY es requerido para ejecutar GLM-OCR en modo MaaS")
+
         from glmocr import GlmOcr
 
-        with GlmOcr(
-            api_key=self.settings.zhipu_api_key or None,
-            api_url=self.settings.glm_ocr_api_url or None,
-            mode=self.settings.glm_ocr_mode,
-        ) as parser:
-            result = parser.parse(str(path))
+        kwargs: dict[str, object] = {
+            "mode": mode,
+            "model": self.settings.glm_ocr_model,
+            "layout_device": self.settings.glm_ocr_layout_device,
+            "_dotted": {
+                "pipeline.max_workers": self.settings.glm_ocr_max_workers,
+                "pipeline.ocr_api.request_timeout": self.settings.glm_ocr_request_timeout_seconds,
+            },
+        }
+        if mode == "maas":
+            kwargs["api_key"] = self.settings.zhipu_api_key
+            if self.settings.glm_ocr_api_url:
+                kwargs["api_url"] = self.settings.glm_ocr_api_url
+        else:
+            host, port = self._selfhosted_host_port()
+            kwargs["ocr_api_host"] = host
+            kwargs["ocr_api_port"] = port
+
+        try:
+            with GlmOcr(**kwargs) as parser:
+                result = parser.parse(str(path))
+        except Exception as exc:
+            message = str(exc)
+            if '"code":"1113"' in message or "余额不足" in message:
+                raise RuntimeError(
+                    "GLM-OCR MaaS rechazó la solicitud por saldo/paquete insuficiente (código 1113)"
+                ) from exc
+            if mode == "selfhosted":
+                raise RuntimeError(
+                    f"GLM-OCR self-hosted no pudo procesar el documento usando "
+                    f"{self.settings.glm_ocr_api_url}: {message}"
+                ) from exc
+            raise RuntimeError(f"GLM-OCR MaaS falló: {message}") from exc
+
         data = result.to_dict()
         text = (
             getattr(result, "markdown_result", None)
@@ -44,29 +90,61 @@ class GlmOcrAdapter:
             raise RuntimeError("GLM-OCR no devolvió contenido textual")
         return str(text)
 
+    def _selfhosted_host_port(self) -> tuple[str, int]:
+        parsed = urlparse(self.settings.glm_ocr_api_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise RuntimeError(
+                "GLM_OCR_API_URL self-hosted debe ser una URL HTTP válida, por ejemplo "
+                "http://glm-ocr:8080/v1/chat/completions"
+            )
+        return parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80)
+
+    def _selfhosted_models_url(self) -> str:
+        parsed = urlparse(self.settings.glm_ocr_api_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise RuntimeError("GLM_OCR_API_URL self-hosted inválido")
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        return f"{parsed.scheme}://{parsed.hostname}:{port}/v1/models"
+
 
 class DocumentProcessor:
-    """Procesa archivos con Docling y deriva a GLM-OCR cuando hace falta."""
+    """Procesa con Docling y permite seleccionar explícitamente GLM-OCR."""
+
+    IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".tiff", ".bmp"}
+    TEXT_SUFFIXES = {".md", ".txt"}
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self.ocr = GlmOcrAdapter(settings)
 
-    def parse(self, path: Path) -> ParsedDocument:
+    def parse(self, path: Path, ocr_policy: OcrPolicy | str | None = None) -> ParsedDocument:
         document_id = hashlib.sha256(path.read_bytes()).hexdigest()[:24]
         suffix = path.suffix.lower()
-        if suffix in {".md", ".txt"}:
+        policy = self._resolve_policy(ocr_policy)
+
+        if suffix in self.TEXT_SUFFIXES:
+            if policy == OcrPolicy.GLM:
+                raise ValueError("ocr=glm solo aplica a PDF o imágenes, no a archivos de texto")
             markdown = path.read_text(encoding="utf-8")
             processor = "text"
+            ocr_used = False
+        elif policy == OcrPolicy.GLM or (policy == OcrPolicy.AUTO and suffix in self.IMAGE_SUFFIXES):
+            # Las imágenes son OCR puro: en auto evitamos ejecutar Docling antes de GLM-OCR.
+            markdown = self.ocr.parse(path)
+            processor = "glm-ocr"
+            ocr_used = True
         else:
             markdown = self._docling(path)
             processor = "docling"
-
-        ocr_used = False
-        if suffix in {".png", ".jpg", ".jpeg", ".tiff", ".bmp"} or len(markdown.strip()) < self.settings.ocr_min_text_chars:
-            markdown = self.ocr.parse(path)
-            processor = "docling+glm-ocr"
-            ocr_used = True
+            ocr_used = False
+            should_fallback_to_glm = (
+                policy == OcrPolicy.AUTO
+                and len(markdown.strip()) < self.settings.ocr_min_text_chars
+            )
+            if should_fallback_to_glm:
+                markdown = self.ocr.parse(path)
+                processor = "docling+glm-ocr"
+                ocr_used = True
 
         title = self._title(markdown, path.stem)
         return ParsedDocument(
@@ -78,6 +156,13 @@ class DocumentProcessor:
             processor=processor,
             ocr_used=ocr_used,
         )
+
+    def _resolve_policy(self, policy: OcrPolicy | str | None) -> OcrPolicy:
+        raw = policy or self.settings.ocr_policy
+        try:
+            return raw if isinstance(raw, OcrPolicy) else OcrPolicy(str(raw).lower())
+        except ValueError as exc:
+            raise ValueError("OCR policy debe ser auto, glm o docling") from exc
 
     @staticmethod
     def _docling(path: Path) -> str:

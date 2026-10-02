@@ -4,10 +4,18 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 
 from pe.axiz.payment_knowledge.container import get_container
-from pe.axiz.payment_knowledge.domain.models import EvaluationRequest, EvaluationResponse, HealthResponse, IngestResponse, QueryRequest, QueryResponse
+from pe.axiz.payment_knowledge.domain.models import (
+    EvaluationRequest,
+    EvaluationResponse,
+    HealthResponse,
+    IngestResponse,
+    OcrPolicy,
+    QueryRequest,
+    QueryResponse,
+)
 
 router = APIRouter(prefix="/api/v1")
 
@@ -17,25 +25,36 @@ def health() -> HealthResponse:
     container = get_container()
     qdrant_ok = container.qdrant.ping()
     memgraph_ok = container.memgraph.ping()
+    raglight_ok = container.raglight.ping()
+    lightrag_ok = container.lightrag.available
+    glm_ocr_ok = container.ingestion.processor.ocr.ping()
     return HealthResponse(
-        status="ok" if qdrant_ok and memgraph_ok else "degraded",
+        status=(
+            "ok"
+            if qdrant_ok and memgraph_ok and raglight_ok and lightrag_ok and glm_ocr_ok
+            else "degraded"
+        ),
         qdrant=qdrant_ok,
         memgraph=memgraph_ok,
-        raglight=container.raglight.ping(),
-        lightrag=container.lightrag.available,
+        raglight=raglight_ok,
+        lightrag=lightrag_ok,
+        glm_ocr=glm_ocr_ok,
         hf_token_configured=bool(container.settings.hf_token.strip()),
     )
 
 
 @router.post("/documents/ingest", response_model=IngestResponse)
-async def ingest_document(file: UploadFile = File(...)) -> IngestResponse:
+async def ingest_document(
+    file: UploadFile = File(...),
+    ocr: OcrPolicy | None = Query(default=None, description="auto | glm | docling"),
+) -> IngestResponse:
     source_name = Path(file.filename or "document.bin").name
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_path = Path(temp_dir) / source_name
         with temp_path.open("wb") as target:
             shutil.copyfileobj(file.file, target)
         try:
-            return await get_container().ingestion.ingest_path(temp_path)
+            return await get_container().ingestion.ingest_path(temp_path, ocr_policy=ocr)
         except Exception as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
