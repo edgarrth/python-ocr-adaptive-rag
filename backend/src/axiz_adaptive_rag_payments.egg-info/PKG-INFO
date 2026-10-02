@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: axiz-adaptive-rag-payments
-Version: 0.1.0
+Version: 0.1.10
 Summary: PoC de RAG adaptativo y GraphRAG para conocimiento de payment processing
 Requires-Python: <3.14,>=3.12
 Requires-Dist: fastapi==0.141.1

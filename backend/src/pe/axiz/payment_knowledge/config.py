@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     glm_ocr_layout_device: str = "cpu"
     glm_ocr_max_workers: int = 1
     glm_ocr_request_timeout_seconds: int = 600
+    glm_ocr_max_tokens: int = 2048
     zhipu_api_key: str = ""
     ocr_policy: str = "auto"
     ocr_min_text_chars: int = 120

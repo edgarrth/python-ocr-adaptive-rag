@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import shutil
 import tempfile
 from pathlib import Path
 
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile
+from starlette.concurrency import run_in_threadpool
 
-from pe.axiz.payment_knowledge.container import get_container
+from pe.axiz.payment_knowledge.container import AppContainer, get_container
 from pe.axiz.payment_knowledge.domain.models import (
     EvaluationRequest,
     EvaluationResponse,
@@ -59,10 +61,24 @@ async def ingest_document(
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
+def _run_seed_in_isolated_container() -> list[IngestResponse]:
+    """Ejecuta el seed en un hilo con su propio event loop y contenedor."""
+
+    async def _run() -> list[IngestResponse]:
+        container = AppContainer()
+        try:
+            return await container.ingestion.ingest_dataset()
+        finally:
+            await container.close()
+
+    return asyncio.run(_run())
+
+
 @router.post("/datasets/seed", response_model=list[IngestResponse])
 async def seed_dataset() -> list[IngestResponse]:
+    """Seed manual sin bloquear el event loop que atiende health/docs/query."""
     try:
-        return await get_container().ingestion.ingest_dataset()
+        return await run_in_threadpool(_run_seed_in_isolated_container)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 

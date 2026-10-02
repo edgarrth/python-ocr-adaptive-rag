@@ -1,9 +1,13 @@
 Metadata-Version: 2.4
 Name: axiz-raglight-service
-Version: 0.1.0
+Version: 0.2.3
 Summary: Servicio aislado de RAGLight para la PoC de payment knowledge
 Requires-Python: <3.14,>=3.12
 Requires-Dist: raglight[qdrant]==3.4.7
+Requires-Dist: langgraph==1.0.5
+Requires-Dist: langgraph-prebuilt==1.0.5
+Requires-Dist: langgraph-checkpoint==3.0.1
+Requires-Dist: langgraph-sdk==0.3.0
 Requires-Dist: fastapi<1,>=0.115
 Requires-Dist: uvicorn[standard]<1,>=0.30
 Requires-Dist: pydantic<3,>=2

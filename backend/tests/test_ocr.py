@@ -7,12 +7,54 @@ from pe.axiz.payment_knowledge.domain.models import OcrPolicy
 from pe.axiz.payment_knowledge.infrastructure.document_processing import DocumentProcessor, GlmOcrAdapter
 
 
-def test_selfhosted_url_deriva_host_port_y_models() -> None:
+def test_selfhosted_url_deriva_models() -> None:
     adapter = GlmOcrAdapter(
         Settings(glm_ocr_mode="selfhosted", glm_ocr_api_url="http://glm-ocr:8080/v1/chat/completions")
     )
-    assert adapter._selfhosted_host_port() == ("glm-ocr", 8080)
     assert adapter._selfhosted_models_url() == "http://glm-ocr:8080/v1/models"
+
+
+def test_selfhosted_imagen_llama_directamente_vllm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    image = tmp_path / "scan.jpg"
+    image.write_bytes(b"jpeg-bytes")
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        status_code = 200
+        text = "ok"
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"choices": [{"message": {"content": "PAY-42\nIdempotencia"}}]}
+
+    def fake_post(url: str, **kwargs: object) -> FakeResponse:
+        captured["url"] = url
+        captured.update(kwargs)
+        return FakeResponse()
+
+    monkeypatch.setattr("pe.axiz.payment_knowledge.infrastructure.document_processing.httpx.post", fake_post)
+    adapter = GlmOcrAdapter(
+        Settings(
+            glm_ocr_mode="selfhosted",
+            glm_ocr_api_url="http://glm-ocr:8080/v1/chat/completions",
+            glm_ocr_model="glm-ocr",
+            glm_ocr_max_tokens=1024,
+        )
+    )
+
+    text = adapter.parse(image)
+
+    assert "PAY-42" in text
+    assert captured["url"] == "http://glm-ocr:8080/v1/chat/completions"
+    payload = captured["json"]
+    assert isinstance(payload, dict)
+    assert payload["model"] == "glm-ocr"
+    assert payload["max_tokens"] == 1024
+    content = payload["messages"][0]["content"]  # type: ignore[index]
+    assert content[0]["text"] == "Text Recognition:"
+    assert content[1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
 
 
 def test_ocr_policy_forzada_glm_omite_docling(tmp_path: Path) -> None:

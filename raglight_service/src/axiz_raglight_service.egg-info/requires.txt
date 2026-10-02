@@ -1,4 +1,8 @@
 raglight[qdrant]==3.4.7
+langgraph==1.0.5
+langgraph-prebuilt==1.0.5
+langgraph-checkpoint==3.0.1
+langgraph-sdk==0.3.0
 fastapi<1,>=0.115
 uvicorn[standard]<1,>=0.30
 pydantic<3,>=2

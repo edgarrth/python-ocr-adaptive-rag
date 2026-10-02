@@ -1,110 +1,93 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
+import logging
 import time
-
-import httpx
-
-
-def _wait_for_infrastructure(api: str, wait_seconds: int, retry_interval: float) -> None:
-    """Espera solo la disponibilidad del backend, Qdrant y Memgraph."""
-    base_url = api.rstrip("/")
-    health_endpoint = f"{base_url}/api/v1/health"
-    deadline = time.monotonic() + wait_seconds
-    last_error = "sin respuesta"
-
-    print(
-        f"[seed] Esperando backend/Qdrant/Memgraph hasta {wait_seconds}s...",
-        flush=True,
-    )
-
-    timeout = httpx.Timeout(connect=5.0, read=10.0, write=10.0, pool=10.0)
-    with httpx.Client(timeout=timeout) as client:
-        while time.monotonic() < deadline:
-            try:
-                health = client.get(health_endpoint)
-                health.raise_for_status()
-                health_payload = health.json()
-                if health_payload.get("qdrant") and health_payload.get("memgraph"):
-                    print("[seed] Backend, Qdrant y Memgraph disponibles.", flush=True)
-                    return
-                last_error = f"infraestructura todavía no disponible: {health_payload}"
-            except (httpx.HTTPError, ValueError) as exc:
-                last_error = str(exc)
-
-            time.sleep(retry_interval)
-
-    raise RuntimeError(
-        "No se pudo disponer de backend/Qdrant/Memgraph dentro de "
-        f"{wait_seconds}s. Último error: {last_error}"
-    )
+from typing import Any
 
 
-def _execute_seed(api: str, processing_timeout_seconds: float | None) -> list[dict[str, object]]:
-    """Ejecuta la indexación sin reutilizar el timeout de readiness."""
-    base_url = api.rstrip("/")
-    seed_endpoint = f"{base_url}/api/v1/datasets/seed"
+def _create_container() -> Any:
+    # Import diferido: permite validar el CLI sin cargar todos los drivers de IA.
+    from pe.axiz.payment_knowledge.container import AppContainer
 
-    read_timeout = (
-        None
-        if processing_timeout_seconds is None or processing_timeout_seconds <= 0
-        else processing_timeout_seconds
-    )
-    timeout = httpx.Timeout(connect=10.0, read=read_timeout, write=60.0, pool=60.0)
-    timeout_label = "sin límite de lectura" if read_timeout is None else f"{read_timeout:g}s"
-
-    print(
-        "[seed] Iniciando precarga e indexación completa "
-        f"(timeout de procesamiento: {timeout_label})...",
-        flush=True,
-    )
-    started = time.monotonic()
-
-    try:
-        with httpx.Client(timeout=timeout) as client:
-            response = client.post(seed_endpoint)
-    except httpx.HTTPError as exc:
-        raise RuntimeError(f"Falló la comunicación durante la precarga: {exc}") from exc
-
-    elapsed = time.monotonic() - started
-    if response.is_error:
-        raise RuntimeError(
-            "La precarga falló con un error no reintentable: "
-            f"HTTP {response.status_code}: {response.text[:2000]}"
-        )
-
-    try:
-        payload = response.json()
-    except ValueError as exc:
-        raise RuntimeError("La API devolvió una respuesta no JSON durante la precarga") from exc
-
-    if not isinstance(payload, list):
-        raise RuntimeError("La API devolvió un payload inesperado al cargar el dataset")
-
-    print(f"[seed] Precarga completada en {elapsed:.1f}s.", flush=True)
-    return payload
+    return AppContainer()
 
 
-def seed_with_retry(
-    api: str,
+async def _wait_for_infrastructure(
+    container: Any,
     wait_seconds: int,
     retry_interval: float,
-    processing_timeout_seconds: float | None = None,
-) -> list[dict[str, object]]:
-    """Espera infraestructura y luego ejecuta una única precarga de larga duración."""
-    _wait_for_infrastructure(api, wait_seconds, retry_interval)
-    return _execute_seed(api, processing_timeout_seconds)
+) -> None:
+    """Espera Qdrant, Memgraph y RAGLight sin ocupar el backend HTTP."""
+    deadline = time.monotonic() + wait_seconds
+    last_state: dict[str, bool] = {}
+
+    print(
+        f"[seed] Esperando Qdrant/Memgraph/RAGLight hasta {wait_seconds}s...",
+        flush=True,
+    )
+
+    while time.monotonic() < deadline:
+        qdrant_ok = await asyncio.to_thread(container.qdrant.ping)
+        memgraph_ok = await asyncio.to_thread(container.memgraph.ping)
+        raglight_ok = (
+            True
+            if not container.raglight.available
+            else await asyncio.to_thread(container.raglight.ping)
+        )
+        last_state = {
+            "qdrant": qdrant_ok,
+            "memgraph": memgraph_ok,
+            "raglight": raglight_ok,
+        }
+        if all(last_state.values()):
+            print(
+                "[seed] Qdrant, Memgraph y RAGLight disponibles. "
+                "El backend HTTP no participa en la precarga.",
+                flush=True,
+            )
+            return
+        await asyncio.sleep(retry_interval)
+
+    raise RuntimeError(
+        "No se pudo disponer de la infraestructura dentro de "
+        f"{wait_seconds}s. Último estado: {last_state}"
+    )
+
+
+async def seed_direct(wait_seconds: int, retry_interval: float) -> list[dict[str, object]]:
+    """Indexa directamente desde un contenedor aislado, sin llamar al backend."""
+    container = _create_container()
+    try:
+        await _wait_for_infrastructure(container, wait_seconds, retry_interval)
+        print(
+            "[seed] Iniciando precarga directa e indexación completa en proceso aislado...",
+            flush=True,
+        )
+        started = time.monotonic()
+        results = await container.ingestion.ingest_dataset()
+        elapsed = time.monotonic() - started
+        print(f"[seed] Precarga completada en {elapsed:.1f}s.", flush=True)
+        return [item.model_dump(mode="json") for item in results]
+    finally:
+        await container.close()
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Precarga el dataset de payment processing usando la API")
-    parser.add_argument("--api", default="http://localhost:8000", help="URL base de la API")
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Precarga el dataset de payment processing directamente contra "
+            "Qdrant/Memgraph/RAGLight/LightRAG sin bloquear el backend HTTP"
+        )
+    )
     parser.add_argument(
         "--wait-seconds",
         type=int,
-        default=0,
-        help="Tiempo máximo para esperar a que backend, Qdrant y Memgraph estén disponibles",
+        default=900,
+        help="Tiempo máximo para esperar Qdrant, Memgraph y RAGLight",
     )
     parser.add_argument(
         "--retry-interval",
@@ -112,23 +95,13 @@ def main() -> None:
         default=3.0,
         help="Segundos entre reintentos mientras se espera la infraestructura",
     )
-    parser.add_argument(
-        "--processing-timeout-seconds",
-        type=float,
-        default=0.0,
-        help=(
-            "Timeout de lectura para la indexación completa; 0 significa sin límite. "
-            "No afecta el timeout de disponibilidad de --wait-seconds."
-        ),
-    )
     args = parser.parse_args()
 
-    wait_seconds = max(args.wait_seconds, 1)
-    payload = seed_with_retry(
-        args.api,
-        wait_seconds,
-        max(args.retry_interval, 0.2),
-        args.processing_timeout_seconds,
+    payload = asyncio.run(
+        seed_direct(
+            max(args.wait_seconds, 1),
+            max(args.retry_interval, 0.2),
+        )
     )
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 

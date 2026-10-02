@@ -44,6 +44,42 @@ services:
     environment:
       HF_HOME: /root/.cache/huggingface
       HUGGINGFACE_HUB_CACHE: /root/.cache/huggingface/hub
+
+      # PERFIL ACTUAL: GTX 1650 / 4 GB / SM75, todavía en modo diagnóstico.
+      # CUDA_LAUNCH_BLOCKING=1 hace síncronos los errores CUDA y reduce rendimiento.
+      # GPU mejor (8 GB+ y runtime ya validado): eliminar esta variable o usar "0".
+      CUDA_LAUNCH_BLOCKING: "1"
+
+      # DEBUG ayuda a diagnosticar la compatibilidad de la GTX 1650.
+      # GPU mejor / ejecución normal: cambiar a INFO.
+      VLLM_LOGGING_LEVEL: DEBUG
+
+    # ------------------------------------------------------------------------
+    # Perfil GPU de GLM-OCR / vLLM
+    # ------------------------------------------------------------------------
+    # Valores actuales: conservadores para GTX 1650 de 4 GB.
+    #
+    # Punto de partida sugerido para una GPU mejor (por ejemplo >= 8 GB VRAM):
+    #   - CUDA_LAUNCH_BLOCKING: quitar o poner "0"
+    #   - VLLM_LOGGING_LEVEL: INFO
+    #   - --cpu-offload-gb: 0
+    #   - --gpu-memory-utilization: 0.85
+    #   - --max-model-len: 16384
+    #   - --max-num-seqs: 2
+    #   - --compilation_config.custom_ops: ["all"] o retirar el override
+    #   - retirar --enforce-eager después de validar compatibilidad para permitir
+    #     torch.compile/CUDA Graphs.
+    #   - se pueden retirar los overrides de attention backend y dejar que vLLM
+    #     seleccione automáticamente el backend apropiado para la GPU.
+    #
+    # Punto de partida sugerido para >= 12/16 GB VRAM:
+    #   - --gpu-memory-utilization: 0.90
+    #   - --max-model-len: 32768
+    #   - --max-num-seqs: 4
+    #   - --cpu-offload-gb: 0
+    #
+    # Son valores iniciales, no garantías: subir concurrencia/contexto de a un
+    # parámetro por vez y validar /v1/models + OCR real + nvidia-smi.
     command:
       - zai-org/GLM-OCR
 
@@ -56,27 +92,44 @@ services:
       - --port
       - "8080"
 
+      # GTX 1650 no soporta BF16; FP16 es el perfil seguro actual.
+      # GPU moderna compatible: puede dejarse auto o usar el dtype soportado por el modelo/runtime.
       - --dtype
       - half
 
+      # GTX 1650/SM75: se fuerza TRITON_ATTN porque FlashAttention 2 requiere GPU más nueva.
+      # GPU moderna: retirar estas dos líneas para que vLLM elija automáticamente.
       - --attention-backend
       - TRITON_ATTN
 
-      # Encoder visual explícitamente con PyTorch SDPA.
+      # GTX 1650/SM75: encoder visual por PyTorch SDPA.
+      # GPU moderna: retirar el override después de validar el backend automático.
       - --mm-encoder-attn-backend
       - TORCH_SDPA
 
+      # GTX 1650/diagnóstico: evita torch.compile y CUDA Graphs.
+      # GPU mejor y ya validada: retirar para recuperar optimizaciones de vLLM.
       - --enforce-eager
 
+      # Concurrencia máxima de secuencias.
+      # 4 GB: 1 | >=8 GB: empezar con 2 | >=12/16 GB: probar 4.
       - --max-num-seqs
       - "1"
 
+      # Contexto máximo.
+      # 4 GB: 8192 (la imagen OCR de prueba usa ~4968 tokens de entrada).
+      # >=8 GB: empezar con 16384 | >=12/16 GB: probar 32768.
+      # El modelo soporta más contexto; estos límites son conservadores para la PoC.
       - --max-model-len
-      - "4096"
+      - "8192"
 
+      # Fracción objetivo de VRAM administrada por vLLM.
+      # 4 GB: 0.70 | >=8 GB: ~0.85 | >=12/16 GB: ~0.90 como punto de partida.
       - --gpu-memory-utilization
       - "0.70"
 
+      # Offload de pesos a RAM para compensar la GTX 1650 de 4 GB.
+      # GPU con suficiente VRAM: cambiar a "0" para evitar tráfico CPU<->GPU.
       - --cpu-offload-gb
       - "1"
 
@@ -88,9 +141,11 @@ services:
       # Evita ejecutar el profiling multimodal ficticio
       - --skip-mm-profiling
 
-      # Evita el kernel CUDA MRoPE incompatible con SM75
+      # Diagnóstico SM75: desactiva todos los custom ops de vLLM.
+      # GPU mejor / runtime compatible: usar '["all"]' o retirar completamente
+      # este override para volver al comportamiento optimizado por defecto.
       - --compilation_config.custom_ops
-      - '["all","-rotary_embedding"]'
+      - '["none"]'
 
     gpus: all
     ipc: host
@@ -157,6 +212,7 @@ services:
       GLM_OCR_LAYOUT_DEVICE: cpu
       GLM_OCR_MAX_WORKERS: "1"
       GLM_OCR_REQUEST_TIMEOUT_SECONDS: "600"
+      GLM_OCR_MAX_TOKENS: "2048"
       OCR_POLICY: auto
     ports:
       - "8000:8000"
@@ -175,17 +231,49 @@ services:
   dataset-seed:
     <<: *backend-image
     container_name: axiz-rag-dataset-seed
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      # El seed usa el pipeline Python directamente. No llama a backend:8000,
+      # por lo que la API queda libre mientras LightRAG/RAGLight indexan.
+      APP_ENV: docker
+      QDRANT_URL: http://qdrant:6333
+      MEMGRAPH_URI: bolt://memgraph:7687
+      RAGLIGHT_SERVICE_URL: http://raglight-service:8010
+      LIGHTRAG_WORKDIR: /app/.runtime/lightrag
+      DATASETS_DIR: /app/datasets/sample_documents
+      HF_HOME: /app/.cache/huggingface
+      HUGGINGFACE_HUB_CACHE: /app/.cache/huggingface/hub
+      SENTENCE_TRANSFORMERS_HOME: /app/.cache/sentence-transformers
+      FASTEMBED_CACHE_PATH: /app/.cache/fastembed
+
+      # El dataset base son Markdown, por lo que el bootstrap no necesita OCR.
+      # Se conserva la URL correcta por coherencia si se agregan PDF/imágenes
+      # al DATASETS_DIR en una ampliación de la PoC.
+      GLM_OCR_MODE: selfhosted
+      GLM_OCR_API_URL: http://glm-ocr:8080/v1/chat/completions
+      GLM_OCR_MODEL: glm-ocr
+      GLM_OCR_LAYOUT_DEVICE: cpu
+      GLM_OCR_MAX_WORKERS: "1"
+      GLM_OCR_REQUEST_TIMEOUT_SECONDS: "600"
+      GLM_OCR_MAX_TOKENS: "2048"
+      OCR_POLICY: auto
     command:
       - python
       - datasets/seed.py
-      - --api
-      - http://backend:8000
       - --wait-seconds
       - "900"
       - --retry-interval
       - "3"
+    volumes:
+      # Comparte canonical/LightRAG con backend y RAGLight.
+      - runtime_data:/app/.runtime
+      # Reutiliza modelos/embeddings descargados por los demás servicios.
+      - hf_cache_data:/app/.cache
     depends_on:
-      - backend
+      - qdrant
+      - memgraph
       - raglight-service
     networks:
       - axiz-rag
@@ -199,11 +287,13 @@ services:
     container_name: axiz-rag-frontend
     ports:
       - "4200:80"
+    # La UI arranca apenas el backend está disponible. No espera al dataset-seed:
+    # el bootstrap puede tardar varios minutos y ya no bloquea la API.
+    # Las consultas RAG completas requieren que el seed haya terminado, pero la
+    # interfaz debe estar disponible desde el inicio para observar el estado.
     depends_on:
       backend:
         condition: service_started
-      dataset-seed:
-        condition: service_completed_successfully
     networks:
       - axiz-rag
     restart: unless-stopped

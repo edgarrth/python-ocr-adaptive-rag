@@ -13,7 +13,7 @@ class MemgraphStore:
 
     def __init__(self, uri: str, user: str = "", password: str = "") -> None:
         auth = (user, password) if user else None
-        self.driver = GraphDatabase.driver(uri, auth=auth)
+        self.driver = GraphDatabase.driver(uri, auth=auth, connection_timeout=5.0)
 
     def close(self) -> None:
         self.driver.close()

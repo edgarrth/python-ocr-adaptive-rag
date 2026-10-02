@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import base64
 import hashlib
+import mimetypes
 import re
 import uuid
 from pathlib import Path
@@ -28,8 +30,7 @@ class GlmOcrAdapter:
         if mode == "maas":
             return bool(self.settings.zhipu_api_key.strip())
         try:
-            endpoint = self._selfhosted_models_url()
-            response = httpx.get(endpoint, timeout=3.0)
+            response = httpx.get(self._selfhosted_models_url(), timeout=3.0)
             return response.status_code == 200
         except Exception:
             return False
@@ -38,29 +39,88 @@ class GlmOcrAdapter:
         mode = self.settings.glm_ocr_mode.lower()
         if mode not in {"maas", "selfhosted"}:
             raise RuntimeError(f"GLM_OCR_MODE no soportado: {self.settings.glm_ocr_mode}")
-        if mode == "maas" and not self.settings.zhipu_api_key:
-            raise RuntimeError("ZHIPU_API_KEY es requerido para ejecutar GLM-OCR en modo MaaS")
+        if mode == "maas":
+            return self._parse_maas(path)
+        return self._parse_selfhosted(path)
 
+    def _parse_selfhosted(self, path: Path) -> str:
+        suffix = path.suffix.lower()
+        if suffix == ".pdf":
+            return self._parse_pdf_selfhosted(path)
+        mime_type = mimetypes.guess_type(path.name)[0] or "image/png"
+        return self._recognize_image_bytes(path.read_bytes(), mime_type)
+
+    def _parse_pdf_selfhosted(self, path: Path) -> str:
+        import pymupdf
+
+        pages: list[str] = []
+        with pymupdf.open(path) as document:
+            for index, page in enumerate(document):
+                pixmap = page.get_pixmap(matrix=pymupdf.Matrix(2.0, 2.0), alpha=False)
+                text = self._recognize_image_bytes(pixmap.tobytes("png"), "image/png")
+                pages.append(f"## Página {index + 1}\n\n{text.strip()}")
+        if not pages:
+            raise RuntimeError("GLM-OCR no pudo rasterizar páginas del PDF")
+        return "\n\n".join(pages)
+
+    def _recognize_image_bytes(self, image: bytes, mime_type: str) -> str:
+        data_url = f"data:{mime_type};base64,{base64.b64encode(image).decode('ascii')}"
+        payload = {
+            "model": self.settings.glm_ocr_model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Text Recognition:"},
+                        {"type": "image_url", "image_url": {"url": data_url}},
+                    ],
+                }
+            ],
+            "max_tokens": self.settings.glm_ocr_max_tokens,
+        }
+        try:
+            response = httpx.post(
+                self.settings.glm_ocr_api_url,
+                json=payload,
+                timeout=float(self.settings.glm_ocr_request_timeout_seconds),
+            )
+            response.raise_for_status()
+            body = response.json()
+        except Exception as exc:
+            detail = ""
+            if isinstance(exc, httpx.HTTPStatusError):
+                detail = f" - {exc.response.text[:800]}"
+            raise RuntimeError(
+                f"GLM-OCR self-hosted no pudo inferir mediante "
+                f"{self.settings.glm_ocr_api_url}: {exc}{detail}"
+            ) from exc
+
+        try:
+            content = body["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise RuntimeError(f"Respuesta inesperada de GLM-OCR/vLLM: {body}") from exc
+        if isinstance(content, list):
+            content = "\n".join(
+                str(item.get("text", "")) if isinstance(item, dict) else str(item)
+                for item in content
+            )
+        text = str(content).strip()
+        if not text:
+            raise RuntimeError("GLM-OCR/vLLM devolvió contenido vacío")
+        return text
+
+    def _parse_maas(self, path: Path) -> str:
+        if not self.settings.zhipu_api_key:
+            raise RuntimeError("ZHIPU_API_KEY es requerido para ejecutar GLM-OCR en modo MaaS")
         from glmocr import GlmOcr
 
         kwargs: dict[str, object] = {
-            "mode": mode,
+            "mode": "maas",
             "model": self.settings.glm_ocr_model,
-            "layout_device": self.settings.glm_ocr_layout_device,
-            "_dotted": {
-                "pipeline.max_workers": self.settings.glm_ocr_max_workers,
-                "pipeline.ocr_api.request_timeout": self.settings.glm_ocr_request_timeout_seconds,
-            },
+            "api_key": self.settings.zhipu_api_key,
         }
-        if mode == "maas":
-            kwargs["api_key"] = self.settings.zhipu_api_key
-            if self.settings.glm_ocr_api_url:
-                kwargs["api_url"] = self.settings.glm_ocr_api_url
-        else:
-            host, port = self._selfhosted_host_port()
-            kwargs["ocr_api_host"] = host
-            kwargs["ocr_api_port"] = port
-
+        if self.settings.glm_ocr_api_url:
+            kwargs["api_url"] = self.settings.glm_ocr_api_url
         try:
             with GlmOcr(**kwargs) as parser:
                 result = parser.parse(str(path))
@@ -69,11 +129,6 @@ class GlmOcrAdapter:
             if '"code":"1113"' in message or "余额不足" in message:
                 raise RuntimeError(
                     "GLM-OCR MaaS rechazó la solicitud por saldo/paquete insuficiente (código 1113)"
-                ) from exc
-            if mode == "selfhosted":
-                raise RuntimeError(
-                    f"GLM-OCR self-hosted no pudo procesar el documento usando "
-                    f"{self.settings.glm_ocr_api_url}: {message}"
                 ) from exc
             raise RuntimeError(f"GLM-OCR MaaS falló: {message}") from exc
 
@@ -89,15 +144,6 @@ class GlmOcrAdapter:
         if not text:
             raise RuntimeError("GLM-OCR no devolvió contenido textual")
         return str(text)
-
-    def _selfhosted_host_port(self) -> tuple[str, int]:
-        parsed = urlparse(self.settings.glm_ocr_api_url)
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-            raise RuntimeError(
-                "GLM_OCR_API_URL self-hosted debe ser una URL HTTP válida, por ejemplo "
-                "http://glm-ocr:8080/v1/chat/completions"
-            )
-        return parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80)
 
     def _selfhosted_models_url(self) -> str:
         parsed = urlparse(self.settings.glm_ocr_api_url)

@@ -32,3 +32,4 @@ backend/src/pe/axiz/payment_knowledge/retrieval/lightrag_adapter.py
 backend/src/pe/axiz/payment_knowledge/retrieval/native.py
 backend/src/pe/axiz/payment_knowledge/retrieval/raglight_adapter.py
 backend/src/pe/axiz/payment_knowledge/retrieval/router.py
+backend/src/pe/axiz/payment_knowledge/retrieval/source_attribution.py

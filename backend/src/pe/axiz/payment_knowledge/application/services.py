@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import shutil
 import time
 from pathlib import Path
@@ -27,6 +28,9 @@ from pe.axiz.payment_knowledge.retrieval.lightrag_adapter import LightRagAdapter
 from pe.axiz.payment_knowledge.retrieval.native import HybridRagRetriever, NativeRagRetriever
 from pe.axiz.payment_knowledge.retrieval.raglight_adapter import RagLightAdapter
 from pe.axiz.payment_knowledge.retrieval.router import AdaptiveRouter
+
+
+logger = logging.getLogger(__name__)
 
 
 class IngestionService:
@@ -105,6 +109,7 @@ class IngestionService:
         self._remove_legacy_canonical_files()
 
         if self.raglight.available:
+            logger.info("Preparando RAGLight para el bootstrap")
             if not await asyncio.to_thread(self.raglight.ping):
                 raise RuntimeError("RAGLight está habilitado pero su servicio no está disponible")
             await asyncio.to_thread(self.raglight.reset)
@@ -112,22 +117,31 @@ class IngestionService:
                 raise RuntimeError("RAGLight no completó su preparación de embeddings/Qdrant")
 
         if self.lightrag.available:
+            logger.info("Reiniciando el storage de LightRAG")
             await self.lightrag.reset()
 
+        paths = [path for path in sorted(self.settings.datasets_dir.glob("*")) if path.is_file()]
         results: list[IngestResponse] = []
-        for path in sorted(self.settings.datasets_dir.glob("*")):
-            if path.is_file():
-                results.append(
-                    await self._ingest_path(
-                        path,
-                        index_raglight=False,
-                        index_lightrag=True,
-                        ocr_policy=None,
-                    )
-                )
+        for index, path in enumerate(paths, start=1):
+            logger.info("Indexando documento %s/%s: %s", index, len(paths), path.name)
+            result = await self._ingest_path(
+                path,
+                index_raglight=False,
+                index_lightrag=True,
+                ocr_policy=None,
+            )
+            results.append(result)
+            logger.info(
+                "Documento indexado: %s, chunks=%s, entidades=%s, lightrag=%s",
+                result.source,
+                result.chunks,
+                result.entities,
+                result.lightrag_indexed,
+            )
 
         raglight_indexed = False
         if self.raglight.available:
+            logger.info("Indexando el corpus canónico completo en RAGLight")
             raglight_indexed = await asyncio.to_thread(self.raglight.index, self.canonical_dir)
             if not raglight_indexed:
                 raise RuntimeError("RAGLight no confirmó la indexación del dataset")
