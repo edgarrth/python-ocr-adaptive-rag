@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "axiz-adaptive-rag-payments"
-version = "0.1.13"
+version = "0.2.0"
 description = "PoC de RAG adaptativo y GraphRAG para conocimiento de payment processing"
 requires-python = ">=3.12,<3.14"
 dependencies = [
@@ -18,6 +18,7 @@ dependencies = [
   "neo4j==6.3.1",
   "docling==2.130.0",
   "glmocr==0.1.5",
+  "Pillow==12.3.0",
   "lightrag-hku==1.5.7",
 ]
 

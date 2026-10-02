@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import base64
+import io
+import math
 import hashlib
 import mimetypes
 import re
@@ -48,7 +50,8 @@ class GlmOcrAdapter:
         if suffix == ".pdf":
             return self._parse_pdf_selfhosted(path)
         mime_type = mimetypes.guess_type(path.name)[0] or "image/png"
-        return self._recognize_image_bytes(path.read_bytes(), mime_type)
+        image, prepared_mime = self._prepare_image_bytes(path.read_bytes(), mime_type)
+        return self._recognize_image_bytes(image, prepared_mime)
 
     def _parse_pdf_selfhosted(self, path: Path) -> str:
         import pymupdf
@@ -56,12 +59,49 @@ class GlmOcrAdapter:
         pages: list[str] = []
         with pymupdf.open(path) as document:
             for index, page in enumerate(document):
-                pixmap = page.get_pixmap(matrix=pymupdf.Matrix(2.0, 2.0), alpha=False)
-                text = self._recognize_image_bytes(pixmap.tobytes("png"), "image/png")
+                scale = max(float(self.settings.glm_ocr_pdf_scale), 0.5)
+                pixmap = page.get_pixmap(matrix=pymupdf.Matrix(scale, scale), alpha=False)
+                image, prepared_mime = self._prepare_image_bytes(pixmap.tobytes("png"), "image/png")
+                text = self._recognize_image_bytes(image, prepared_mime)
                 pages.append(f"## Página {index + 1}\n\n{text.strip()}")
         if not pages:
             raise RuntimeError("GLM-OCR no pudo rasterizar páginas del PDF")
         return "\n\n".join(pages)
+
+    def _prepare_image_bytes(self, image: bytes, mime_type: str) -> tuple[bytes, str]:
+        """Reduce resolución antes del encoder multimodal sin deformar la imagen.
+
+        El perfil por defecto está pensado para GPU de 4 GB: limita lado y píxeles
+        antes de enviar la imagen a vLLM. Esto reduce tokens visuales y latencia.
+        """
+        from PIL import Image, ImageOps
+
+        try:
+            with Image.open(io.BytesIO(image)) as source:
+                prepared = ImageOps.exif_transpose(source).convert("RGB")
+                width, height = prepared.size
+                max_side = max(int(self.settings.glm_ocr_image_max_side), 1)
+                max_pixels = max(int(self.settings.glm_ocr_image_max_pixels), 1)
+                scale_side = min(1.0, max_side / max(width, height))
+                scale_pixels = min(1.0, math.sqrt(max_pixels / max(width * height, 1)))
+                scale = min(scale_side, scale_pixels)
+                if scale < 0.999:
+                    prepared = prepared.resize(
+                        (max(1, round(width * scale)), max(1, round(height * scale))),
+                        Image.Resampling.LANCZOS,
+                    )
+                output = io.BytesIO()
+                prepared.save(
+                    output,
+                    format="JPEG",
+                    quality=max(60, min(int(self.settings.glm_ocr_image_quality), 100)),
+                    optimize=True,
+                )
+                return output.getvalue(), "image/jpeg"
+        except Exception:
+            # Permite que pruebas con bytes simulados y formatos exóticos sigan
+            # llegando al endpoint; vLLM será quien valide el payload final.
+            return image, mime_type
 
     def _recognize_image_bytes(self, image: bytes, mime_type: str) -> str:
         data_url = f"data:{mime_type};base64,{base64.b64encode(image).decode('ascii')}"

@@ -1,18 +1,22 @@
 [
-  {
-    "question": "¿Qué significa el código 05 y qué debería revisar operaciones?",
-    "expected_sources": ["authorization_codes.md"]
-  },
-  {
-    "question": "¿Qué componentes se relacionan entre la autorización y la conciliación?",
-    "expected_sources": ["reconciliation.md"]
-  },
-  {
-    "question": "¿Cómo evita la idempotencia cobros duplicados cuando hay timeout?",
-    "expected_sources": ["idempotency.md"]
-  },
-  {
-    "question": "¿Para qué sirve la tokenización respecto al PAN?",
-    "expected_sources": ["pci_tokenization.md"]
-  }
+  {"question":"¿Qué significa el código 05 y qué debería revisar operaciones?","category":"exact_code","expected_sources":["authorization_codes.md"],"expected_strategy":"hybrid_rag"},
+  {"question":"¿Qué representa el código 51 en una autorización?","category":"exact_code","expected_sources":["authorization_codes.md"],"expected_strategy":"hybrid_rag"},
+  {"question":"¿Cuándo se puede reintentar un código 91?","category":"exact_code","expected_sources":["authorization_codes.md","idempotency.md"],"expected_strategy":"hybrid_rag"},
+  {"question":"¿Qué indica ISO 8583 sobre los códigos 05, 51 y 91 descritos en la guía?","category":"exact_code","expected_sources":["authorization_codes.md"],"expected_strategy":"hybrid_rag"},
+  {"question":"¿Cómo evita la idempotencia cobros duplicados cuando hay timeout?","category":"semantic","expected_sources":["idempotency.md"],"expected_strategy":"native_rag"},
+  {"question":"¿Qué debe ocurrir si se reutiliza una clave de idempotencia con un payload incompatible?","category":"semantic","expected_sources":["idempotency.md"],"expected_strategy":"native_rag"},
+  {"question":"¿Qué datos se deben registrar para reconstruir un incidente de pago?","category":"semantic","expected_sources":["idempotency.md"],"expected_strategy":"native_rag"},
+  {"question":"¿Por qué un timeout no debe tratarse automáticamente como rechazo?","category":"semantic","expected_sources":["authorization_codes.md","idempotency.md"],"expected_strategy":"native_rag"},
+  {"question":"¿Para qué sirve la tokenización respecto al PAN?","category":"compliance","expected_sources":["pci_tokenization.md"],"expected_strategy":"native_rag"},
+  {"question":"¿Se puede conservar el CVV después de la autorización?","category":"compliance","expected_sources":["pci_tokenization.md"],"expected_strategy":"native_rag"},
+  {"question":"¿Qué componente debería mantener la relación entre token y PAN?","category":"compliance","expected_sources":["pci_tokenization.md"],"expected_strategy":"native_rag"},
+  {"question":"¿Cómo reduce la tokenización el alcance de servicios que manejan datos sensibles?","category":"compliance","expected_sources":["pci_tokenization.md"],"expected_strategy":"native_rag"},
+  {"question":"¿Qué componentes se relacionan entre la autorización y la conciliación?","category":"relational","expected_sources":["reconciliation.md"],"expected_strategy":"graphrag"},
+  {"question":"Describe el flujo entre Payment Gateway, adquirente, red y emisor durante la autorización.","category":"relational","expected_sources":["authorization_codes.md","reconciliation.md"],"expected_strategy":"graphrag"},
+  {"question":"¿Qué relación existe entre autorización, captura, conciliación y liquidación?","category":"relational","expected_sources":["reconciliation.md"],"expected_strategy":"graphrag"},
+  {"question":"¿Qué componentes participan en clearing y settlement después de la autorización?","category":"relational","expected_sources":["reconciliation.md"],"expected_strategy":"graphrag"},
+  {"question":"¿Qué debe revisar operaciones si una transacción autorizada no aparece en conciliación?","category":"operations","expected_sources":["reconciliation.md"],"expected_strategy":"native_rag"},
+  {"question":"¿Por qué la correlación de conciliación no debería usar solamente monto y fecha?","category":"operations","expected_sources":["reconciliation.md"],"expected_strategy":"native_rag"},
+  {"question":"¿Cómo deben ser los reintentos del envío de clearing?","category":"operations","expected_sources":["reconciliation.md","idempotency.md"],"expected_strategy":"native_rag"},
+  {"question":"¿Qué control permite auditar el paso de autorizado a liquidado?","category":"operations","expected_sources":["reconciliation.md"],"expected_strategy":"native_rag"}
 ]

@@ -154,9 +154,42 @@ else
   warn "No se pudo inspeccionar $SEED_CONTAINER; se continúa asumiendo que el corpus ya fue precargado"
 fi
 
-# 5) Idempotencia documental: reingestar el mismo archivo debe reemplazar, no duplicar.
+# 5) Ingesta asíncrona: el request debe devolver 202/job y el worker completar el pipeline.
 IDEMPOTENCY_SAMPLE="$ROOT_DIR/datasets/sample_documents/idempotency.md"
 [[ -f "$IDEMPOTENCY_SAMPLE" ]] || fail "No existe la muestra de idempotencia: $IDEMPOTENCY_SAMPLE"
+ASYNC_CODE="$(curl -sS --max-time 30 -o "$TMP_DIR/job-submit.json" -w "%{http_code}" \
+  -X POST "$API_URL/api/v1/documents/jobs?index_external=false" \
+  -F "file=@$IDEMPOTENCY_SAMPLE")"
+[[ "$ASYNC_CODE" == "202" ]] || fail "La ingesta asíncrona no devolvió HTTP 202 (HTTP $ASYNC_CODE)"
+JOB_ID="$(python3 - "$TMP_DIR/job-submit.json" <<'PY'
+import json, sys
+p=json.load(open(sys.argv[1], encoding="utf-8"))
+assert p.get("status") == "queued", p
+print(p["job_id"])
+PY
+)"
+for _ in $(seq 1 60); do
+  curl -fsS --max-time 15 "$API_URL/api/v1/jobs/$JOB_ID" > "$TMP_DIR/job.json" \
+    || fail "No se pudo consultar el job asíncrono"
+  JOB_STATUS="$(python3 - "$TMP_DIR/job.json" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1], encoding="utf-8")).get("status", ""))
+PY
+)"
+  [[ "$JOB_STATUS" == "succeeded" ]] && break
+  [[ "$JOB_STATUS" == "failed" ]] && { cat "$TMP_DIR/job.json" >&2; fail "El job asíncrono falló"; }
+  sleep 1
+done
+python3 - "$TMP_DIR/job.json" <<'PY' || fail "El job no confirmó progreso/resultado"
+import json, sys
+p=json.load(open(sys.argv[1], encoding="utf-8"))
+assert p.get("status") == "succeeded", p
+assert int(p.get("progress", 0)) == 100, p
+assert (p.get("result") or {}).get("indexed") is True, p
+PY
+ok "Ingesta asíncrona completa un job sin bloquear el request HTTP"
+
+# 6) Idempotencia documental: reingestar el mismo archivo debe reemplazar, no duplicar.
 for attempt in 1 2; do
   curl -fsS --max-time 60 \
     -X POST "$API_URL/api/v1/documents/ingest?index_external=false" \
@@ -202,7 +235,9 @@ cat > "$TMP_DIR/native-request.json" <<'JSON'
   "strategy": "native_rag",
   "top_k": 5,
   "include_trace": true,
-  "include_evidence": true
+  "include_evidence": true,
+  "rerank": true,
+  "deduplicate": true
 }
 JSON
 curl -fsS --max-time 60 \
@@ -216,8 +251,12 @@ p = json.load(open(sys.argv[1], encoding="utf-8"))
 sources = [str(x.get("source", "")) for x in p.get("contexts", [])]
 assert p.get("executed_strategy") == "native_rag", p
 assert "idempotency.md" in sources, sources
+ranking = (p.get("trace") or {}).get("ranking") or {}
+assert ranking.get("reranked") is True, ranking
+assert ranking.get("deduplicated") is True, ranking
+assert int(ranking.get("candidates", 0)) >= len(p.get("contexts", [])), ranking
 PY
-ok "Native RAG recupera idempotency.md"
+ok "Native RAG recupera idempotency.md con reranking + deduplicación"
 
 # 7) Adaptive Routing: la consulta relacional debe ir a GraphRAG.
 curl -fsS --max-time 60 \
@@ -243,7 +282,17 @@ assert len(p.get("edges", [])) > 0, p
 PY
 ok "Memgraph devuelve relaciones para AUTORIZACION"
 
-# 9) RAGLight real: debe recuperar al menos un contexto.
+curl -fsS --max-time 30 "$API_URL/api/v1/graph/overview?limit=40" > "$TMP_DIR/graph-overview.json" \
+  || fail "La vista general del grafo falló"
+python3 - "$TMP_DIR/graph-overview.json" <<'PY' || fail "El overview de Memgraph no devolvió nodos/relaciones"
+import json, sys
+p=json.load(open(sys.argv[1], encoding="utf-8"))
+assert len(p.get("nodes", [])) > 0, p
+assert len(p.get("edges", [])) > 0, p
+PY
+ok "API de administración del grafo devuelve overview navegable"
+
+# 10) RAGLight real: debe recuperar al menos un contexto.
 cat > "$TMP_DIR/raglight-request.json" <<'JSON'
 {
   "question": "¿Qué significa el código 05 en una autorización?",
@@ -309,11 +358,17 @@ if [[ "${RUN_EVALUATION,,}" == "true" ]]; then
 import json, sys
 p = json.load(open(sys.argv[1], encoding="utf-8"))
 s = p.get("summary", {})
-for k in ("native_rag", "hybrid_rag", "raglight", "graphrag"):
+for k in ("native_rag", "hybrid_rag", "raglight", "graphrag", "auto"):
     assert k in s, (k, s)
     assert float(s[k].get("successful_cases", 0)) > 0, (k, s[k])
+    for metric in ("mrr", "raw_mrr", "ndcg_at_k", "raw_ndcg_at_k", "recall_at_k"):
+        assert metric in s[k], (k, metric, s[k])
+comparison = p.get("ranking_comparison", [])
+assert len(comparison) >= 5, comparison
+assert all("delta_mrr" in row and "delta_ndcg_at_k" in row for row in comparison), comparison
+assert int(p.get("dataset_cases", 0)) >= 10, p.get("dataset_cases")
 PY
-  ok "Evaluación completa devuelve métricas de los motores base"
+  ok "Evals comparan ranking raw vs reranked con MRR/nDCG/recall"
 fi
 
 echo

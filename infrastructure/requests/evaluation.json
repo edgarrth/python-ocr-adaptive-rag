@@ -1,4 +1,5 @@
 {
-  "strategies": ["native_rag", "hybrid_rag", "raglight", "graphrag", "lightrag"],
-  "top_k": 5
+  "strategies": ["native_rag", "hybrid_rag", "raglight", "graphrag", "lightrag", "auto"],
+  "top_k": 5,
+  "compare_reranking": true
 }

@@ -1,22 +1,27 @@
 <div class="shell">
   <aside class="rail left-rail">
     <img class="logo" src="assets/axiz-logo@2x.png" alt="Axiz">
+
     <button class="primary wide" (click)="newConversation()">Nueva conversación</button>
 
-    <div class="section-title">Conocimiento</div>
+    <div class="section-title">Workspace</div>
+    <button class="nav-item" [class.active]="workspace() === 'chat'" (click)="switchWorkspace('chat')">Chat / RAG Playground</button>
+    <button class="nav-item" [class.active]="workspace() === 'documents'" (click)="switchWorkspace('documents')">Administrar documentos</button>
+    <button class="nav-item" [class.active]="workspace() === 'graph'" (click)="switchWorkspace('graph')">Grafo de conocimiento</button>
+    <button class="nav-item" [class.active]="workspace() === 'evaluations'" (click)="switchWorkspace('evaluations')">Evals y rankings</button>
+
+    <div class="section-title">Dataset</div>
     <button class="nav-item" (click)="seed()">Precargar dataset de pagos</button>
-    <label class="upload-box">
-      <span>Seleccionar documento</span>
-      <input type="file" (change)="onFile($event)" accept=".pdf,.docx,.md,.txt,.png,.jpg,.jpeg">
-    </label>
-    <button class="nav-item" [disabled]="!selectedFile()" (click)="upload()">Procesar documento</button>
 
     <div class="section-title">Preguntas de ejemplo</div>
     @for (example of examples; track example) {
       <button class="history-item" (click)="useExample(example)">{{ example }}</button>
     }
 
-    <div class="rail-footer">Docling · GLM-OCR · Qdrant · Memgraph</div>
+    <div class="rail-footer">
+      Docling · GLM-OCR · Qdrant · Memgraph<br>
+      Native RAG · Hybrid · GraphRAG · RAGLight · LightRAG
+    </div>
   </aside>
 
   <main class="center">
@@ -25,136 +30,307 @@
         <h1>{{ title() }}</h1>
         <div class="status-line">
           <span class="status-dot" [class.offline]="apiStatus() !== 'online'"></span>
-          {{ apiStatus() === 'online' ? 'API, Qdrant y Memgraph disponibles' : apiStatus() === 'checking' ? 'Verificando servicios' : 'Servicios no disponibles' }}
+          {{ apiStatus() === 'online' ? 'Servicios disponibles' : apiStatus() === 'checking' ? 'Verificando servicios' : 'Servicios no disponibles' }}
         </div>
       </div>
       <div class="chips">
-        <span>Adaptive RAG</span><span>Hybrid</span><span>GraphRAG</span><span>RAGLight</span><span>LightRAG</span>
+        <span>Async ingestion</span><span>Semantic dedup</span><span>Reranker</span><span>Evals</span>
       </div>
     </header>
 
-    <section class="chat-panel">
-      @if (messages().length === 0) {
-        <div class="empty-state">
-          <div class="brand-mark">AX</div>
-          <h2>¿Qué quieres investigar sobre tus pagos?</h2>
-          <p>Consulta rechazos, conciliación, idempotencia y controles. El router puede elegir recuperación vectorial, híbrida o basada en grafo.</p>
-        </div>
-      }
+    @if (notice()) {
+      <div class="notice">{{ notice() }}</div>
+    }
 
-      @for (message of messages(); track $index) {
-        <article class="message" [class.user]="message.role === 'user'">
-          @if (message.role === 'assistant') {
-            <div class="avatar brand-avatar">AX</div>
-          }
-          <div class="bubble">
-            <div class="content">{{ message.content }}</div>
-            @if (message.payload) {
-              <div class="result-strip">
-                <span>Estrategia: <strong>{{ message.payload.executed_strategy }}</strong></span>
-                <span>Retrieval: {{ message.payload.timings_ms['retrieval'] }} ms</span>
-                <span>Total: {{ message.payload.timings_ms['total'] }} ms</span>
-              </div>
+    @if (workspace() === 'chat') {
+      <section class="chat-panel">
+        @if (messages().length === 0) {
+          <div class="empty-state">
+            <div class="brand-mark">AX</div>
+            <h2>RAG Playground</h2>
+            <p>Compara estrategias, inspecciona evidencia, observa el routing adaptativo y el efecto del reranking y la deduplicación.</p>
+          </div>
+        }
 
-              @if (showTrace && traceEntries(message.payload).length) {
-                <details>
-                  <summary>Trazabilidad técnica</summary>
-                  <div class="trace-grid">
-                    @for (entry of traceEntries(message.payload); track entry[0]) {
-                      <div class="trace-key">{{ entry[0] }}</div>
-                      <div class="trace-value">{{ entry[1] | json }}</div>
-                    }
-                  </div>
-                </details>
-              }
+        @for (message of messages(); track $index) {
+          <article class="message" [class.user]="message.role === 'user'">
+            @if (message.role === 'assistant') {
+              <div class="avatar brand-avatar">AX</div>
+            }
+            <div class="bubble">
+              <div class="content">{{ message.content }}</div>
+              @if (message.payload) {
+                <div class="result-strip">
+                  <span>Estrategia: <strong>{{ message.payload.executed_strategy }}</strong></span>
+                  <span>Retrieval: {{ message.payload.timings_ms['retrieval'] }} ms</span>
+                  <span>Total: {{ message.payload.timings_ms['total'] }} ms</span>
+                </div>
 
-              @if (showEvidence && message.payload.contexts.length) {
-                <details>
-                  <summary>Evidencia recuperada</summary>
-                  <div class="evidence-list">
-                    @for (context of message.payload.contexts; track context.id) {
-                      <div class="evidence-card">
-                        <div class="evidence-head"><strong>{{ context.source }}</strong><span>{{ context.score | number:'1.3-4' }}</span></div>
-                        <p>{{ context.text }}</p>
-                        @if (context.entities.length) {
-                          <div class="entity-row">
-                            @for (entity of context.entities; track entity) { <span>{{ entity }}</span> }
+                @if (showTrace && traceEntries(message.payload).length) {
+                  <details>
+                    <summary>Trazabilidad técnica</summary>
+                    <div class="trace-grid">
+                      @for (entry of traceEntries(message.payload); track entry[0]) {
+                        <div class="trace-key">{{ entry[0] }}</div>
+                        <div class="trace-value">{{ entry[1] | json }}</div>
+                      }
+                    </div>
+                  </details>
+                }
+
+                @if (showEvidence && message.payload.contexts.length) {
+                  <details open>
+                    <summary>Evidencia recuperada</summary>
+                    <div class="evidence-list">
+                      @for (context of message.payload.contexts; track context.id) {
+                        <div class="evidence-card">
+                          <div class="evidence-head">
+                            <strong>{{ context.source }}</strong>
+                            <span>score {{ context.score | number:'1.3-4' }}</span>
                           </div>
-                        }
-                      </div>
-                    }
-                  </div>
-                </details>
+                          <div class="rank-meta">
+                            @if (context.metadata['original_rank']) { <span>rank original #{{ context.metadata['original_rank'] }}</span> }
+                            @if (context.metadata['rerank_score']) { <span>rerank {{ context.metadata['rerank_score'] }}</span> }
+                            @if (context.metadata['semantic_score']) { <span>semantic {{ context.metadata['semantic_score'] }}</span> }
+                          </div>
+                          <p>{{ context.text }}</p>
+                          @if (context.entities.length) {
+                            <div class="entity-row">
+                              @for (entity of context.entities; track entity) { <span>{{ entity }}</span> }
+                            </div>
+                          }
+                        </div>
+                      }
+                    </div>
+                  </details>
+                }
               }
+            </div>
+          </article>
+        }
+
+        @if (loading()) {
+          <div class="working"><span></span><span></span><span></span> Procesando</div>
+        }
+      </section>
+
+      <section class="composer">
+        <textarea [(ngModel)]="question" (keydown)="onComposerKeydown($event)" placeholder="Pregunta sobre payment processing..."></textarea>
+        <button class="send" (click)="send()" [disabled]="loading() || !question.trim()">Enviar</button>
+      </section>
+    }
+
+    @if (workspace() === 'documents') {
+      <section class="workspace-panel">
+        <div class="workspace-head">
+          <div>
+            <h2>Documentos indexados</h2>
+            <p>Administra Qdrant, Memgraph y el corpus canónico. La ingesta interactiva usa jobs asíncronos.</p>
+          </div>
+          <button class="secondary" (click)="refreshDocuments()">Actualizar</button>
+        </div>
+
+        <div class="upload-card">
+          <div>
+            <strong>Nueva ingesta</strong>
+            <p>OCR y persistencia se ejecutan fuera del request HTTP. Puedes seguir navegando mientras el worker procesa el documento.</p>
+          </div>
+          <label class="upload-box inline-upload">
+            <span>{{ selectedFile()?.name || 'Seleccionar PDF, imagen o Markdown' }}</span>
+            <input type="file" (change)="onFile($event)" accept=".pdf,.docx,.md,.txt,.png,.jpg,.jpeg">
+          </label>
+          <label class="toggle-row compact"><input type="checkbox" [(ngModel)]="uploadExternal"> Reconstruir RAGLight + LightRAG</label>
+          <button class="primary" [disabled]="!selectedFile() || loading()" (click)="uploadAsync()">Crear job de ingesta</button>
+        </div>
+
+        @if (activeJob()) {
+          <div class="job-focus">
+            <div class="job-head"><strong>{{ activeJob()!.source }}</strong><span>{{ activeJob()!.status }} · {{ activeJob()!.stage }}</span></div>
+            <div class="progress"><span [style.width.%]="activeJob()!.progress"></span></div>
+            <small>{{ activeJob()!.progress }}%</small>
+            @if (activeJob()!.error) { <p class="error">{{ activeJob()!.error }}</p> }
+          </div>
+        }
+
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Documento</th><th>Processor</th><th>Qdrant</th><th>Memgraph</th><th>Canónico</th><th>Estado</th><th></th></tr></thead>
+            <tbody>
+              @for (document of documents(); track document.document_id) {
+                <tr>
+                  <td><strong>{{ document.source }}</strong><small>{{ document.document_id }}</small></td>
+                  <td>{{ document.processor }}</td>
+                  <td>{{ document.qdrant_chunks }}</td>
+                  <td>{{ document.memgraph_chunks }}</td>
+                  <td>{{ document.canonical_files }}</td>
+                  <td><span class="status-pill" [class.bad]="!document.consistent">{{ document.consistent ? 'consistente' : 'revisar' }}</span></td>
+                  <td class="actions"><button (click)="reindexDocument(document)">Reindexar</button><button class="danger" (click)="deleteDocument(document)">Eliminar</button></td>
+                </tr>
+              }
+            </tbody>
+          </table>
+        </div>
+      </section>
+    }
+
+    @if (workspace() === 'graph') {
+      <section class="workspace-panel graph-workspace">
+        <div class="workspace-head">
+          <div>
+            <h2>Grafo de conocimiento</h2>
+            <p>Entidades y relaciones materializadas desde los chunks indexados en Memgraph.</p>
+          </div>
+          <button class="secondary" (click)="loadGraphOverview()">Recargar grafo</button>
+        </div>
+
+        <div class="graph-canvas">
+          @if (graphNodes().length) {
+            <svg viewBox="0 0 760 420" role="img" aria-label="Grafo de entidades">
+              @for (edge of graphOverviewEdges(); track edge.source + edge.target) {
+                @if (nodeById(edge.source); as source) {
+                  @if (nodeById(edge.target); as target) {
+                    <line [attr.x1]="source.x" [attr.y1]="source.y" [attr.x2]="target.x" [attr.y2]="target.y" class="graph-line"></line>
+                  }
+                }
+              }
+              @for (node of graphNodes(); track node.id) {
+                <g>
+                  <circle [attr.cx]="node.x" [attr.cy]="node.y" [attr.r]="12 + Math.min(node.mentions, 8)" class="graph-node"></circle>
+                  <text [attr.x]="node.x" [attr.y]="node.y + 30" text-anchor="middle">{{ node.id }}</text>
+                </g>
+              }
+            </svg>
+          } @else {
+            <div class="empty-mini">No hay entidades cargadas.</div>
+          }
+        </div>
+
+        <div class="graph-details">
+          <div class="card">
+            <h3>Vecindario por entidad</h3>
+            <div class="inline-form"><input [(ngModel)]="graphEntity" placeholder="AUTORIZACIÓN"><button class="secondary" (click)="loadGraph()">Buscar</button></div>
+            <div class="graph-list">
+              @for (edge of graphEdges(); track edge.source + edge.target) {
+                <div class="graph-edge"><strong>{{ edge.source }}</strong><span>→ {{ edge.target }}</span><small>{{ edge.weight }}</small></div>
+              }
+            </div>
+          </div>
+          <div class="card">
+            <h3>Entidades más conectadas</h3>
+            <div class="entity-cloud">
+              @for (node of graphNodes(); track node.id) { <span>{{ node.id }} · {{ node.mentions }}</span> }
+            </div>
+          </div>
+        </div>
+      </section>
+    }
+
+    @if (workspace() === 'evaluations') {
+      <section class="workspace-panel eval-workspace">
+        <div class="workspace-head">
+          <div>
+            <h2>Comparativa de rankings con Evals</h2>
+            <p>Compara ranking bruto vs. reranking, MRR, nDCG@K, recall, latencia y deduplicación para cada motor.</p>
+          </div>
+          <button class="primary" (click)="runEvaluation()" [disabled]="loading()">Ejecutar evals</button>
+        </div>
+
+        @if (!evaluation()) {
+          <div class="empty-eval">
+            <strong>Dataset de evaluación listo</strong>
+            <p>Ejecuta la suite para producir un leaderboard objetivo de las estrategias y medir el delta introducido por el reranker.</p>
+          </div>
+        } @else {
+          <div class="eval-kpis">
+            <div><strong>{{ evaluation()!.dataset_cases }}</strong><span>casos</span></div>
+            <div><strong>{{ rankingRows().length }}</strong><span>estrategias</span></div>
+            <div><strong>MRR + nDCG</strong><span>ranking</span></div>
+            <div><strong>raw → reranked</strong><span>comparativa</span></div>
+          </div>
+
+          <div class="leaderboard">
+            <div class="leaderboard-head"><span>#</span><span>Estrategia</span><span>MRR raw</span><span>MRR reranked</span><span>Δ MRR</span><span>nDCG</span><span>Hit rate</span><span>Latencia</span></div>
+            @for (row of rankingRows(); track row.strategy; let rank = $index) {
+              <div class="leaderboard-row" [class.top]="rank === 0">
+                <span class="rank">{{ rank + 1 }}</span>
+                <strong>{{ strategyLabel(row.strategy) }}</strong>
+                <span>{{ row.raw_mrr | number:'1.3-3' }}</span>
+                <span>{{ row.reranked_mrr | number:'1.3-3' }}</span>
+                <span class="delta" [class.negative]="row.delta_mrr < 0">{{ deltaLabel(row.delta_mrr) }}</span>
+                <span>{{ row.reranked_ndcg_at_k | number:'1.3-3' }}</span>
+                <span>{{ row.hit_rate | percent:'1.0-0' }}</span>
+                <span>{{ row.avg_latency_ms | number:'1.0-0' }} ms</span>
+              </div>
+              <div class="ranking-detail">
+                <span>Δ nDCG {{ deltaLabel(row.delta_ndcg_at_k) }}</span>
+                <span>Recall {{ row.recall_at_k | percent:'1.0-0' }}</span>
+                <span>Dedup {{ row.avg_duplicates_removed | number:'1.1-1' }} chunks/run</span>
+                @if (row.routing_accuracy !== undefined && row.routing_accuracy !== null) { <span>Routing {{ row.routing_accuracy | percent:'1.0-0' }}</span> }
+              </div>
             }
           </div>
-        </article>
-      }
 
-      @if (loading()) {
-        <div class="working"><span></span><span></span><span></span> Procesando consulta</div>
-      }
-    </section>
-
-    <section class="composer">
-      <textarea [(ngModel)]="question" (keydown)="onComposerKeydown($event)" placeholder="Pregunta sobre payment processing..."></textarea>
-      <button class="send" (click)="send()" [disabled]="loading() || !question.trim()">Enviar</button>
-    </section>
+          <div class="category-grid">
+            @for (category of categoryEntries(); track category[0]) {
+              <div class="card category-card">
+                <h3>{{ category[0] }}</h3>
+                @for (entry of category[1] | keyvalue; track entry.key) {
+                  <div class="category-row"><strong>{{ strategyLabel(entry.key) }}</strong><span>MRR {{ entry.value['mrr'] | number:'1.2-2' }}</span><span>nDCG {{ entry.value['ndcg_at_k'] | number:'1.2-2' }}</span></div>
+                }
+              </div>
+            }
+          </div>
+        }
+      </section>
+    }
   </main>
 
   <aside class="rail right-rail">
-    <div class="section-title first">Configuración</div>
-    <p class="muted">Ajustes del agente y comparación de estrategias.</p>
+    @if (workspace() === 'chat') {
+      <div class="section-title first">RAG Playground</div>
+      <p class="muted">Ajustes de retrieval y postprocesamiento.</p>
+      <label>Estrategia</label>
+      <select [(ngModel)]="strategy">
+        @for (item of strategies; track item[0]) { <option [value]="item[0]">{{ item[1] }}</option> }
+      </select>
+      <label>Contextos Top K <strong>{{ topK }}</strong></label>
+      <input type="range" min="1" max="10" [(ngModel)]="topK">
+      <label class="toggle-row"><input type="checkbox" [(ngModel)]="rerank"> Reranking común</label>
+      <label class="toggle-row"><input type="checkbox" [(ngModel)]="deduplicate"> Deduplicación semántica</label>
+      <label class="toggle-row"><input type="checkbox" [(ngModel)]="showTrace"> Actividad técnica</label>
+      <label class="toggle-row"><input type="checkbox" [(ngModel)]="showEvidence"> Evidencia recuperada</label>
+      <div class="divider"></div>
+      <div class="tech-note"><strong>Pipeline</strong><p>retrieve candidatos → semantic dedup → rerank → top K → generación</p></div>
+    }
 
-    <label>Estrategia</label>
-    <select [(ngModel)]="strategy">
-      @for (item of strategies; track item[0]) {
-        <option [value]="item[0]">{{ item[1] }}</option>
-      }
-    </select>
-
-    <label>Contextos Top K <strong>{{ topK }}</strong></label>
-    <input type="range" min="1" max="10" [(ngModel)]="topK">
-
-    <label class="toggle-row"><input type="checkbox" [(ngModel)]="showTrace"> Actividad técnica</label>
-    <label class="toggle-row"><input type="checkbox" [(ngModel)]="showEvidence"> Evidencia recuperada</label>
-
-    <div class="divider"></div>
-    <div class="section-title">Evaluación</div>
-    <p class="muted">Compara Native RAG, Hybrid RAG, RAGLight, GraphRAG y LightRAG con el set incluido. Los motores no configurados quedan registrados como fallidos sin detener la corrida.</p>
-    <button class="nav-item" (click)="runEvaluation()" [disabled]="loading()">Ejecutar evaluación</button>
-
-    @if (evaluation()) {
-      <div class="metrics">
-        @for (entry of summaryEntries(); track entry[0]) {
-          <div class="metric-card">
-            <strong>{{ entry[0] }}</strong>
-            <span>Hit rate {{ entry[1]['hit_rate'] | percent:'1.0-0' }}</span>
-            <span>MRR {{ entry[1]['mrr'] | number:'1.2-2' }}</span>
-            <span>{{ entry[1]['avg_latency_ms'] | number:'1.0-0' }} ms</span>
-            <span>OK {{ entry[1]['successful_cases'] | number:'1.0-0' }} · fallos {{ entry[1]['failed_cases'] | number:'1.0-0' }}</span>
+    @if (workspace() === 'documents') {
+      <div class="section-title first">Jobs de ingesta</div>
+      <p class="muted">Los trabajos sobreviven como snapshots y exponen etapa + progreso.</p>
+      <button class="nav-item" (click)="refreshJobs()">Actualizar jobs</button>
+      <div class="job-list">
+        @for (job of jobs(); track job.job_id) {
+          <div class="mini-job">
+            <strong>{{ job.source }}</strong><span>{{ job.status }} · {{ job.progress }}%</span><small>{{ job.stage }}</small>
           </div>
         }
       </div>
     }
 
-    <div class="divider"></div>
-    <div class="section-title">Explorador de grafo</div>
-    <p class="muted">Consulta las relaciones de co-ocurrencia materializadas en Memgraph.</p>
-    <input class="graph-input" [(ngModel)]="graphEntity" placeholder="AUTORIZACIÓN">
-    <button class="nav-item" (click)="loadGraph()">Consultar relaciones</button>
-    @if (graphEdges().length) {
-      <div class="graph-list">
-        @for (edge of graphEdges(); track edge.source + edge.target) {
-          <div class="graph-edge"><strong>{{ edge.source }}</strong><span>→ {{ edge.target }}</span><small>{{ edge.weight }}</small></div>
-        }
-      </div>
+    @if (workspace() === 'graph') {
+      <div class="section-title first">Grafo</div>
+      <p class="muted">La vista muestra hasta 24 entidades principales para mantener legibilidad.</p>
+      <div class="metric-card"><strong>{{ graphNodes().length }}</strong><span>entidades visibles</span></div>
+      <div class="metric-card"><strong>{{ graphOverviewEdges().length }}</strong><span>relaciones visibles</span></div>
     }
 
-    <div class="divider"></div>
-    <div class="tech-note">
-      <strong>Modo AUTO</strong>
-      <p>Códigos exactos → Hybrid RAG<br>Relaciones y flujo → GraphRAG<br>Consulta semántica → Native RAG</p>
-    </div>
+    @if (workspace() === 'evaluations') {
+      <div class="section-title first">Evals</div>
+      <p class="muted">El leaderboard se ordena por MRR reranked, luego nDCG, hit rate y latencia.</p>
+      <label>Top K <strong>{{ topK }}</strong></label>
+      <input type="range" min="1" max="10" [(ngModel)]="topK">
+      <button class="nav-item" (click)="runEvaluation()" [disabled]="loading()">Volver a ejecutar</button>
+      <div class="divider"></div>
+      <div class="tech-note"><strong>Qué resalta</strong><p>MRR y nDCG miden el orden del ranking; el delta raw→reranked muestra si el postprocesamiento realmente mejora la posición de la evidencia esperada.</p></div>
+    }
   </aside>
 </div>

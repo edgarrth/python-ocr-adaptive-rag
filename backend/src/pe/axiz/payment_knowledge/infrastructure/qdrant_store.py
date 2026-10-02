@@ -83,6 +83,33 @@ class QdrantStore:
         ]
         self.client.upsert(collection_name=self.collection, points=points, wait=True)
 
+
+    def list_documents(self, limit: int = 1000) -> list[dict[str, object]]:
+        """Agrupa los chunks de Qdrant por documento para administración."""
+        grouped: dict[str, dict[str, object]] = {}
+        for item in self.all_contexts(limit=limit):
+            row = grouped.setdefault(
+                item.document_id,
+                {
+                    "document_id": item.document_id,
+                    "source": item.source,
+                    "title": item.title,
+                    "processor": str(item.metadata.get("processor", "")),
+                    "qdrant_chunks": 0,
+                    "entities": set(),
+                },
+            )
+            row["qdrant_chunks"] = int(row["qdrant_chunks"]) + 1
+            cast_entities = row["entities"]
+            if isinstance(cast_entities, set):
+                cast_entities.update(item.entities)
+        result: list[dict[str, object]] = []
+        for row in grouped.values():
+            entities = row.pop("entities")
+            row["entities"] = sorted(entities) if isinstance(entities, set) else []
+            result.append(row)
+        return sorted(result, key=lambda row: str(row.get("source", "")).lower())
+
     def search(self, query: str, limit: int) -> list[ContextItem]:
         self.ensure_collection()
         vector = self.embedder.embed([query])[0]

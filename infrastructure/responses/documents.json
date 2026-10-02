@@ -1,0 +1,13 @@
+[
+  {
+    "document_id": "1dddea1f5faf491fb42d356e",
+    "source": "idempotency.md",
+    "title": "Idempotencia, reintentos y prevención de cobros duplicados",
+    "processor": "text",
+    "qdrant_chunks": 1,
+    "memgraph_chunks": 1,
+    "canonical_files": 1,
+    "entities": ["IDEMPOTENCIA", "PAYMENT", "REINTENTO", "TIMEOUT"],
+    "consistent": true
+  }
+]

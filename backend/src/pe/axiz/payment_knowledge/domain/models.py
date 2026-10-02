@@ -22,6 +22,13 @@ class RetrievalStrategy(StrEnum):
     LIGHTRAG = "lightrag"
 
 
+class JobStatus(StrEnum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+
+
 class DocumentChunk(BaseModel):
     id: str
     document_id: str
@@ -51,6 +58,8 @@ class QueryRequest(BaseModel):
     top_k: int = Field(default=5, ge=1, le=20)
     include_trace: bool = True
     include_evidence: bool = True
+    rerank: bool = True
+    deduplicate: bool = True
 
 
 class QueryResponse(BaseModel):
@@ -87,6 +96,18 @@ class DocumentIndexState(BaseModel):
     consistent: bool
 
 
+class DocumentSummary(BaseModel):
+    document_id: str
+    source: str
+    title: str
+    processor: str
+    qdrant_chunks: int
+    memgraph_chunks: int
+    canonical_files: int
+    entities: list[str] = Field(default_factory=list)
+    consistent: bool
+
+
 class HealthResponse(BaseModel):
     status: str
     qdrant: bool
@@ -97,6 +118,18 @@ class HealthResponse(BaseModel):
     hf_token_configured: bool
 
 
+class JobResponse(BaseModel):
+    job_id: str
+    status: JobStatus
+    stage: str
+    progress: int = Field(ge=0, le=100)
+    source: str
+    created_at: str
+    updated_at: str
+    result: IngestResponse | None = None
+    error: str | None = None
+
+
 class EvaluationRequest(BaseModel):
     strategies: list[RetrievalStrategy] = Field(
         default_factory=lambda: [
@@ -105,26 +138,58 @@ class EvaluationRequest(BaseModel):
             RetrievalStrategy.RAGLIGHT,
             RetrievalStrategy.GRAPHRAG,
             RetrievalStrategy.LIGHTRAG,
+            RetrievalStrategy.AUTO,
         ]
     )
     top_k: int = Field(default=5, ge=1, le=20)
+    compare_reranking: bool = True
 
 
 class EvaluationItem(BaseModel):
     question: str
+    category: str = "general"
     strategy: RetrievalStrategy
+    expected_strategy: RetrievalStrategy | None = None
     expected_sources: list[str]
     retrieved_sources: list[str]
+    raw_sources: list[str] = Field(default_factory=list)
     hit: bool
     reciprocal_rank: float
+    raw_reciprocal_rank: float = 0.0
+    ndcg_at_k: float = 0.0
+    raw_ndcg_at_k: float = 0.0
+    recall_at_k: float = 0.0
+    precision_at_k: float = 0.0
+    routing_correct: bool | None = None
+    duplicates_removed: int = 0
     latency_ms: float
     success: bool = True
     error: str | None = None
 
 
+class RankingComparison(BaseModel):
+    strategy: RetrievalStrategy
+    raw_mrr: float
+    reranked_mrr: float
+    delta_mrr: float
+    raw_ndcg_at_k: float
+    reranked_ndcg_at_k: float
+    delta_ndcg_at_k: float
+    hit_rate: float
+    recall_at_k: float
+    avg_latency_ms: float
+    avg_duplicates_removed: float
+    routing_accuracy: float | None = None
+    successful_cases: int
+    failed_cases: int
+
+
 class EvaluationResponse(BaseModel):
     items: list[EvaluationItem]
     summary: dict[str, dict[str, float]]
+    ranking_comparison: list[RankingComparison] = Field(default_factory=list)
+    category_summary: dict[str, dict[str, dict[str, float]]] = Field(default_factory=dict)
+    dataset_cases: int = 0
 
 
 class ParsedDocument(BaseModel):

@@ -1,10 +1,36 @@
 {
   "items": [],
   "summary": {
-    "native_rag": {"hit_rate": 1.0, "mrr": 0.875, "avg_latency_ms": 16.8, "successful_cases": 4.0, "failed_cases": 0.0},
-    "hybrid_rag": {"hit_rate": 1.0, "mrr": 1.0, "avg_latency_ms": 24.2, "successful_cases": 4.0, "failed_cases": 0.0},
-    "raglight": {"hit_rate": 1.0, "mrr": 0.875, "avg_latency_ms": 31.5, "successful_cases": 4.0, "failed_cases": 0.0},
-    "graphrag": {"hit_rate": 1.0, "mrr": 1.0, "avg_latency_ms": 38.7, "successful_cases": 4.0, "failed_cases": 0.0},
-    "lightrag": {"hit_rate": 0.0, "mrr": 0.0, "avg_latency_ms": 0.0, "successful_cases": 0.0, "failed_cases": 4.0}
-  }
+    "native_rag": {
+      "hit_rate": 0.0,
+      "mrr": 0.0,
+      "raw_mrr": 0.0,
+      "ndcg_at_k": 0.0,
+      "raw_ndcg_at_k": 0.0,
+      "recall_at_k": 0.0,
+      "precision_at_k": 0.0,
+      "avg_latency_ms": 0.0,
+      "avg_duplicates_removed": 0.0
+    }
+  },
+  "ranking_comparison": [
+    {
+      "strategy": "native_rag",
+      "raw_mrr": 0.0,
+      "reranked_mrr": 0.0,
+      "delta_mrr": 0.0,
+      "raw_ndcg_at_k": 0.0,
+      "reranked_ndcg_at_k": 0.0,
+      "delta_ndcg_at_k": 0.0,
+      "hit_rate": 0.0,
+      "recall_at_k": 0.0,
+      "avg_latency_ms": 0.0,
+      "avg_duplicates_removed": 0.0,
+      "routing_accuracy": null,
+      "successful_cases": 0,
+      "failed_cases": 0
+    }
+  ],
+  "category_summary": {},
+  "dataset_cases": 20
 }

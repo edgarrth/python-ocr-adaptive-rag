@@ -70,6 +70,54 @@ class MemgraphStore:
                 document_id=document_id,
             ).consume()
 
+
+    def delete_document(self, document_id: str) -> None:
+        """Elimina el documento completo y limpia entidades huérfanas."""
+        self.delete_document_content(document_id)
+        with self.driver.session() as session:
+            session.run(
+                "MATCH (d:Document {id:$document_id}) DETACH DELETE d",
+                document_id=document_id,
+            ).consume()
+            session.run(
+                """
+                MATCH (e:Entity)
+                WHERE NOT (e)<-[:MENTIONS]-(:Chunk)
+                DETACH DELETE e
+                """
+            ).consume()
+
+    def overview(self, limit: int = 120) -> dict[str, list[dict[str, object]]]:
+        """Devuelve un resumen navegable del grafo para la UI."""
+        safe_limit = max(1, min(int(limit), 300))
+        with self.driver.session() as session:
+            node_records = session.run(
+                """
+                MATCH (e:Entity)
+                OPTIONAL MATCH (e)<-[:MENTIONS]-(c:Chunk)
+                RETURN e.name AS id, count(DISTINCT c) AS mentions
+                ORDER BY mentions DESC, id ASC
+                LIMIT $limit
+                """,
+                limit=safe_limit,
+            )
+            nodes = [dict(record) for record in node_records]
+            allowed = [str(node["id"]) for node in nodes]
+            if not allowed:
+                return {"nodes": [], "edges": []}
+            edge_records = session.run(
+                """
+                MATCH (a:Entity)-[r:CO_OCCURS]->(b:Entity)
+                WHERE a.name IN $allowed AND b.name IN $allowed
+                RETURN a.name AS source, b.name AS target, count(r) AS weight
+                ORDER BY weight DESC
+                LIMIT $limit
+                """,
+                allowed=allowed,
+                limit=safe_limit * 2,
+            )
+            return {"nodes": nodes, "edges": [dict(record) for record in edge_records]}
+
     def replace_document(self, chunks: list[DocumentChunk]) -> None:
         """Reemplaza el subgrafo del documento para hacer la ingesta idempotente."""
         if not chunks:
