@@ -32,7 +32,6 @@ services:
       - axiz-rag
     restart: unless-stopped
 
-
   glm-ocr:
     image: axiz-glm-ocr:local
     build:
@@ -42,25 +41,63 @@ services:
     env_file:
       - path: ../.env
         required: false
+    environment:
+      HF_HOME: /root/.cache/huggingface
+      HUGGINGFACE_HUB_CACHE: /root/.cache/huggingface/hub
     command:
-      - --model
       - zai-org/GLM-OCR
+
       - --served-model-name
       - glm-ocr
+
       - --host
       - 0.0.0.0
+
       - --port
       - "8080"
+
+      - --dtype
+      - half
+
+      - --attention-backend
+      - TRITON_ATTN
+
+      # Encoder visual explícitamente con PyTorch SDPA.
+      - --mm-encoder-attn-backend
+      - TORCH_SDPA
+
+      - --enforce-eager
+
+      - --max-num-seqs
+      - "1"
+
       - --max-model-len
-      - "16384"
+      - "4096"
+
       - --gpu-memory-utilization
-      - "0.75"
+      - "0.70"
+
+      - --cpu-offload-gb
+      - "1"
+
+      # GLM-OCR solo procesa imágenes.
+      # Evitamos que vLLM inicialice/profilée la ruta de video.
+      - --limit-mm-per-prompt
+      - '{"image":1,"video":0}'
+
+      # Evita ejecutar el profiling multimodal ficticio
+      - --skip-mm-profiling
+
+      # Evita el kernel CUDA MRoPE incompatible con SM75
+      - --compilation_config.custom_ops
+      - '["all","-rotary_embedding"]'
+
     gpus: all
     ipc: host
     ports:
       - "8080:8080"
     volumes:
-      - hf_cache_data:/root/.cache
+      - hf_cache_data:/root/.cache/huggingface
       - vllm_cache_data:/root/.cache/vllm
     networks:
       - axiz-rag
@@ -112,12 +149,14 @@ services:
       HUGGINGFACE_HUB_CACHE: /app/.cache/huggingface/hub
       SENTENCE_TRANSFORMERS_HOME: /app/.cache/sentence-transformers
       FASTEMBED_CACHE_PATH: /app/.cache/fastembed
+
+      # OCR local: sin consumo de Zhipu MaaS.
       GLM_OCR_MODE: selfhosted
       GLM_OCR_API_URL: http://glm-ocr:8080/v1/chat/completions
       GLM_OCR_MODEL: glm-ocr
       GLM_OCR_LAYOUT_DEVICE: cpu
-      GLM_OCR_MAX_WORKERS: "4"
-      GLM_OCR_REQUEST_TIMEOUT_SECONDS: "300"
+      GLM_OCR_MAX_WORKERS: "1"
+      GLM_OCR_REQUEST_TIMEOUT_SECONDS: "600"
       OCR_POLICY: auto
     ports:
       - "8000:8000"

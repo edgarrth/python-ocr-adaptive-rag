@@ -7,6 +7,8 @@ La aplicación procesa documentos con Docling, usa GLM-OCR como ruta OCR cuando 
 
 > Versión v13: corrige la atribución de fuentes en RAGLight y LightRAG para que Hit Rate/MRR midan documentos reales, elimina el `temperature` forzado en la síntesis OpenAI-compatible y hace que la exploración de vecindad de Memgraph tolere mayúsculas y acentos.
 
+> Versión v16: mantiene GLM-OCR sobre vLLM y agrega un perfil de baja VRAM para GTX 1650 de 4 GB: FP16, `TRITON_ATTN`, eager mode, `max-model-len=4096`, una secuencia concurrente, `gpu-memory-utilization=0.70` y `cpu-offload-gb=1`. Este perfil prioriza que el modelo pueda cargar; el offload aumenta la latencia por transferencias CPU↔GPU.
+
 La interfaz está hecha en Angular tomando como base visual el proyecto de ejemplo: navegación a la izquierda, conversación al centro y configuración/evaluación a la derecha. La adapté para carga documental, selección de estrategia, evidencia recuperada, trazabilidad técnica, evaluación y exploración del grafo.
 
 ## Qué quiero demostrar con esta PoC
@@ -221,8 +223,8 @@ GLM_OCR_MODE=selfhosted
 GLM_OCR_API_URL=http://glm-ocr:8080/v1/chat/completions
 GLM_OCR_MODEL=glm-ocr
 GLM_OCR_LAYOUT_DEVICE=cpu
-GLM_OCR_MAX_WORKERS=4
-GLM_OCR_REQUEST_TIMEOUT_SECONDS=300
+GLM_OCR_MAX_WORKERS=1
+GLM_OCR_REQUEST_TIMEOUT_SECONDS=600
 OCR_POLICY=auto
 ZHIPU_API_KEY=
 ```
@@ -242,7 +244,7 @@ curl -X POST "http://localhost:8000/api/v1/documents/ingest?ocr=glm" \
   -F "file=@datasets/ocr_samples/documento_escaneado_prueba_ocr_pagos.pdf"
 ```
 
-El contenedor usa la imagen oficial de vLLM `v0.19.0-ubuntu2404`, con `transformers>=5.3.0`, tal como requiere la guía de despliegue de GLM-OCR. La imagen de vLLM expone el intérprete como `python3`, por lo que `Dockerfile.glm-ocr` instala/valida `transformers==5.3.0` con `python3 -m pip`; no depende del alias `python`. Se limita el contexto a 16384, la concurrencia OCR a 4 workers y la utilización de VRAM a `0.75` para una PoC de baja concurrencia.
+El contenedor usa la imagen oficial de vLLM `v0.19.0-ubuntu2404` y fija `transformers==5.3.0`. La imagen de vLLM expone el intérprete como `python3`, por lo que `Dockerfile.glm-ocr` instala y valida Transformers con `python3 -m pip`; no depende del alias `python`. Para la GTX 1650 de 4 GB uso un perfil conservador: `dtype=half`, `TRITON_ATTN`, `--enforce-eager`, `max-num-seqs=1`, contexto `4096`, `gpu-memory-utilization=0.70` y `cpu-offload-gb=1`. El último parámetro mantiene hasta 1 GiB de pesos en RAM y los transfiere durante el forward pass; reduce presión de VRAM a cambio de mayor latencia.
 
 ## Estructura del proyecto
 
@@ -370,7 +372,7 @@ Para Docker necesito:
 
 - Docker Engine o Docker Desktop con Compose v2;
 - una GPU NVIDIA visible desde Docker (`nvidia-smi` en WSL/Linux y soporte `--gpus all`);
-- aproximadamente 8 GB de VRAM como referencia práctica para GLM-OCR 0.9B en esta PoC;
+- la configuración incluida intenta ejecutar GLM-OCR/vLLM en una GTX 1650 de 4 GB mediante 1 GiB de CPU offload; 8 GB o más siguen siendo una referencia mucho más cómoda si quiero evitar offload;
 - 16 GB de RAM del sistema como mínimo razonable y 32 GB recomendados para ejecutar todo el stack con margen.
 
 El primer arranque descarga los pesos de GLM-OCR desde Hugging Face y puede tardar varios minutos. Los pesos y la caché de compilación de vLLM quedan persistidos en volúmenes Docker.
@@ -482,8 +484,8 @@ Para Docker, Compose usa las variables del `.env` ubicado en la raíz. Las direc
 | `GLM_OCR_API_URL` | No en Docker | endpoint OpenAI-compatible del contenedor vLLM | `http://glm-ocr:8080/v1/chat/completions` |
 | `GLM_OCR_MODEL` | No en Docker | nombre servido por vLLM | `glm-ocr` |
 | `GLM_OCR_LAYOUT_DEVICE` | No en Docker | dispositivo del detector de layout del SDK | `cpu` |
-| `GLM_OCR_MAX_WORKERS` | No en Docker | concurrencia máxima del pipeline OCR | `4` |
-| `GLM_OCR_REQUEST_TIMEOUT_SECONDS` | No en Docker | timeout por llamada al modelo self-hosted | `300` |
+| `GLM_OCR_MAX_WORKERS` | No en Docker | concurrencia máxima del pipeline OCR | `1` |
+| `GLM_OCR_REQUEST_TIMEOUT_SECONDS` | No en Docker | timeout por llamada al modelo self-hosted | `600` |
 | `OCR_POLICY` | No | política por defecto de ingesta | `auto`, `glm` o `docling` |
 | `ZHIPU_API_KEY` | No | queda solo por compatibilidad si manualmente vuelvo a MaaS | vacío en esta PoC |
 | `RAGLIGHT_ENABLED` | No | habilita el flujo RAGLight | `true`/`false`; no necesita token |
@@ -509,8 +511,8 @@ GLM_OCR_MODE=selfhosted
 GLM_OCR_API_URL=http://localhost:8080/v1/chat/completions
 GLM_OCR_MODEL=glm-ocr
 GLM_OCR_LAYOUT_DEVICE=cpu
-GLM_OCR_MAX_WORKERS=4
-GLM_OCR_REQUEST_TIMEOUT_SECONDS=300
+GLM_OCR_MAX_WORKERS=1
+GLM_OCR_REQUEST_TIMEOUT_SECONDS=600
 OCR_POLICY=auto
 ZHIPU_API_KEY=
 OPENAI_API_KEY=
@@ -532,8 +534,8 @@ GLM_OCR_MODE=selfhosted
 GLM_OCR_API_URL=http://localhost:8080/v1/chat/completions
 GLM_OCR_MODEL=glm-ocr
 GLM_OCR_LAYOUT_DEVICE=cpu
-GLM_OCR_MAX_WORKERS=4
-GLM_OCR_REQUEST_TIMEOUT_SECONDS=300
+GLM_OCR_MAX_WORKERS=1
+GLM_OCR_REQUEST_TIMEOUT_SECONDS=600
 OCR_POLICY=auto
 
 RAGLIGHT_ENABLED=true
@@ -904,7 +906,7 @@ Antes de empaquetar esta versión validé:
 - construcción de wheels del backend y RAGLight sin instalar dependencias;
 - integridad del ZIP final.
 
-El entorno usado para preparar el ZIP no tiene runtime Docker/NVIDIA, por lo que la ejecución real del nuevo contenedor vLLM debe validarse en la máquina destino. El Compose sigue la receta oficial de GLM-OCR/vLLM: modelo `zai-org/GLM-OCR`, vLLM 0.19.0, Transformers 5.3.0 y API OpenAI-compatible. En la v15 se corrigió específicamente el build de `Dockerfile.glm-ocr`: la imagen oficial no garantiza el comando `python`, pero sí `python3`, de modo que la capa usa `python3 -m pip` y valida en build las versiones efectivas de Python, Transformers y vLLM.
+El entorno usado para preparar el ZIP no tiene runtime Docker/NVIDIA, por lo que la ejecución real del contenedor vLLM con CPU offload debe validarse en la máquina destino. El Compose usa `zai-org/GLM-OCR`, vLLM 0.19.0, Transformers 5.3.0 y API OpenAI-compatible. La v15 corrigió el build de `Dockerfile.glm-ocr` para usar `python3`; la v16 agrega el perfil de 4 GB con `cpu-offload-gb=1`, `gpu-memory-utilization=0.70`, contexto 4096, FP16, Triton Attention y eager mode.
 
 ## Decisiones de alcance
 
@@ -948,13 +950,39 @@ La imagen `vllm/vllm-openai:v0.19.0-ubuntu2404` no garantiza el alias `python`; 
 /bin/sh: 1: python: not found
 ```
 
-la v15 ya lo corrige usando:
+la v15 y versiones posteriores lo corrigen usando:
 
 ```dockerfile
 RUN python3 -m pip install --upgrade "transformers==5.3.0"
 ```
 
 Además, la misma capa hace un import de `transformers` y `vllm` y muestra sus versiones durante el build. Si la imagen base ya terminó de descargarse en un intento anterior, Docker debería reutilizarla.
+
+### GLM-OCR en GTX 1650 de 4 GB y CPU offload
+
+El perfil Docker de esta versión está ajustado para probar GLM-OCR en una GTX 1650 de 4 GB. vLLM usa `--cpu-offload-gb 1`, por lo que hasta 1 GiB de pesos puede permanecer en RAM y accederse mediante UVA durante la inferencia. Esto puede permitir que el modelo cargue donde el perfil sin offload se queda sin margen, pero la inferencia será más lenta porque parte de los pesos cruza CPU↔GPU en cada forward pass.
+
+Los parámetros relevantes del servicio `glm-ocr` son:
+
+```text
+dtype=half
+attention-backend=TRITON_ATTN
+enforce-eager=true
+max-num-seqs=1
+max-model-len=4096
+gpu-memory-utilization=0.70
+cpu-offload-gb=1
+```
+
+Para probar solo GLM-OCR sin reconstruir el resto del stack:
+
+```bash
+docker compose -f infrastructure/docker-compose.yml stop glm-ocr
+docker compose -f infrastructure/docker-compose.yml up --no-deps --force-recreate glm-ocr
+docker compose -f infrastructure/docker-compose.yml logs -f glm-ocr
+```
+
+Cuando el servidor quede listo, `curl http://localhost:8080/v1/models` debe responder con el modelo `glm-ocr`. Si todavía falla por KV cache, el siguiente ajuste a probar es reducir más `max-model-len`; si falla durante la carga de pesos aun con offload, una GPU de 4 GB puede ser insuficiente para este runtime aunque el modelo base sea de 0.9B.
 
 ### Compatibilidad Qdrant y RAGLight
 
