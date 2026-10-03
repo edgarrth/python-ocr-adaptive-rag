@@ -1,10 +1,7 @@
-# Adaptive RAG & GraphRAG para Payment Knowledge
+# Adaptive RAG & GraphRAG
 
-Esta PoC implementa una plataforma de conocimiento para payment processing con varias estrategias de RAG sobre el mismo corpus. El objetivo es poder cargar documentos, consultar evidencia, explorar relaciones de conocimiento y comparar de forma medible cómo cambia el ranking entre Native RAG, Hybrid RAG, RAGLight, GraphRAG, LightRAG y Adaptive Routing.
-
-La versión v25 parte de la v24 validada end-to-end y agrega todas las mejoras P1 que quería probar: optimización de GLM-OCR para GPU de baja VRAM, ingesta asíncrona por jobs, deduplicación semántica de chunks, reranking común para todas las estrategias y evals avanzados para comparar ranking bruto contra ranking rerankeado. La interfaz Angular también quedó separada en cuatro áreas: RAG Playground, administración de documentos, explorador de grafo y Evals/Rankings.
-
-## Qué agrega v25
+Esta PoC implementa una plataforma de conocimiento para payment processing con varias estrategias de RAG sobre el mismo corpus. 
+El objetivo es poder cargar documentos, consultar evidencia, explorar relaciones de conocimiento y comparar de forma medible cómo cambia el ranking entre Native RAG, Hybrid RAG, RAGLight, GraphRAG, LightRAG y Adaptive Routing.
 
 ### 1. Optimización de GLM-OCR
 
@@ -23,7 +20,7 @@ El objetivo es reducir tokens visuales y latencia en una GTX 1650 de 4 GB sin ca
 
 ### 2. Ingesta asíncrona con jobs
 
-La UI ya no necesita mantener abierto un request HTTP durante OCR e indexación. El flujo interactivo usa:
+El flujo interactivo usa:
 
 ```text
 POST /api/v1/documents/jobs
@@ -42,9 +39,10 @@ worker interno
   RAGLight/LightRAG opcionales
 ```
 
-Cada job expone `status`, `stage`, `progress`, resultado y error. Los snapshots se guardan bajo `.runtime/jobs`, por lo que un reinicio deja visible que un trabajo anterior fue interrumpido en vez de desaparecer silenciosamente.
+Cada job expone `status`, `stage`, `progress`, resultado y error. Los snapshots se guardan bajo `.runtime/jobs`, por lo que 
+un reinicio deja visible que un trabajo anterior fue interrumpido en vez de desaparecer silenciosamente.
 
-Para la GTX 1650 dejo un solo worker por defecto para evitar dos inferencias OCR compitiendo por la misma GPU:
+Para una GPU con poca memooria, dejo un solo worker por defecto para evitar dos inferencias OCR compitiendo por la misma GPU:
 
 ```env
 INGESTION_JOB_WORKERS=1
@@ -83,7 +81,8 @@ Esto evita gastar contexto en fragmentos prácticamente equivalentes proveniente
 
 ### 4. Reranker común
 
-Native RAG, Hybrid RAG, GraphRAG, RAGLight y LightRAG pueden entregar scores que no son directamente comparables. Por eso v25 agrega un reranker común basado en cuatro señales:
+Native RAG, Hybrid RAG, GraphRAG, RAGLight y LightRAG pueden entregar scores que no son directamente comparables. Por eso la 
+PoC mantiene un reranker común basado en cuatro señales:
 
 ```text
 65% similitud semántica query-context
@@ -105,7 +104,7 @@ Cada contexto devuelto incluye en `metadata` el `original_rank`, `original_score
 
 ### 5. Evals avanzados y comparativa de rankings
 
-El dataset de evals pasó de 4 a 20 casos agrupados en categorías como `exact_code`, `semantic`, `compliance`, `relational` y `operations`.
+El dataset de evals tiene 20 casos agrupados en categorías como `exact_code`, `semantic`, `compliance`, `relational` y `operations`.
 
 Por cada estrategia se calcula:
 
@@ -122,7 +121,8 @@ Por cada estrategia se calcula:
 - delta MRR;
 - delta nDCG.
 
-La UI muestra un leaderboard ordenado por MRR reranked, nDCG, Hit Rate y latencia. La comparación central no es solo "qué estrategia quedó arriba", sino si el reranker realmente mejoró el orden de la evidencia esperada.
+La UI muestra un leaderboard ordenado por MRR reranked, nDCG, Hit Rate y latencia. La comparación central no es solo "qué 
+estrategia quedó arriba", sino si el reranker realmente mejoró el orden de la evidencia esperada.
 
 Ejemplo conceptual:
 
@@ -132,7 +132,8 @@ Ejemplo conceptual:
 | GraphRAG | 0.79 | 0.88 | +0.09 | 0.90 | 90% |
 | Native RAG | 0.76 | 0.84 | +0.08 | 0.86 | 90% |
 
-Los valores anteriores son solo un ejemplo de cómo se renderiza el reporte. Los números reales salen de `POST /api/v1/evaluations/run` en cada entorno.
+Los valores anteriores son solo un ejemplo de cómo se renderiza el reporte. Los números reales salen de 
+`POST /api/v1/evaluations/run` en cada entorno.
 
 ## UI
 
@@ -140,7 +141,7 @@ La aplicación Angular expone cuatro workspaces principales.
 
 ### RAG Playground
 
-Permite seleccionar estrategia, Top K, activar/desactivar reranking y deduplicación, revisar evidencia y ver el trace completo del router y del ranking.
+Permite seleccionar estrategia, Top K, activar/desactivar reranking y deduplicación, revisar evidencia y ver el trace completo del router y del ranking. En v27 el chat usa SSE de extremo a extremo: el asistente aparece con el icono de Axiz, muestra la actividad segura del pipeline, renderiza la respuesta por deltas y mantiene el composer visible mientras el thread tiene su propio scroll. El historial queda guardado localmente en el navegador y puede retomarse desde la sidebar.
 
 ### Administrar documentos
 
@@ -244,7 +245,8 @@ flowchart LR
     EVAL --> POST
 ```
 
-Los stores persistentes siguen siendo Qdrant y Memgraph. No agregué Kafka, PostgreSQL, MongoDB u otra infraestructura porque no son necesarias para demostrar estas mejoras P1. La cola de jobs es interna al backend y guarda snapshots en el volumen `.runtime`.
+Los stores persistentes siguen siendo Qdrant y Memgraph. 
+La cola de jobs es interna al backend y guarda snapshots en el volumen `.runtime`.
 
 ## Estructura principal
 
@@ -313,7 +315,8 @@ adaptive-rag-payments-poc/
 | TypeScript | 5.9.3 |
 | Node | 22.x |
 
-RAGLight continúa en un servicio Python separado porque su árbol de dependencias no se mezcla con Docling en el backend principal.
+RAGLight continúa en un servicio Python separado porque su árbol de dependencias no se mezcla con Docling en el 
+backend principal.
 
 ## Endpoints
 
@@ -327,10 +330,11 @@ RAGLight continúa en un servicio Python separado porque su árbol de dependenci
 | 6 | `GET /api/v1/documents/{id}/index-state` | revisar consistencia idempotente |
 | 7 | `POST /api/v1/documents/{id}/reindex` | reconstruir Qdrant/Memgraph desde canónico |
 | 8 | `DELETE /api/v1/documents/{id}` | eliminar documento |
-| 9 | `POST /api/v1/query` | ejecutar RAG + dedup + reranking + generación |
-| 10 | `GET /api/v1/graph/overview` | obtener nodos/relaciones para la UI |
-| 11 | `GET /api/v1/graph/neighborhood/{entity}` | expandir vecindario de entidad |
-| 12 | `POST /api/v1/evaluations/run` | ejecutar evals y ranking comparativo |
+| 9 | `POST /api/v1/query/stream` | chat SSE: actividad + retrieval + deltas + respuesta final |
+| 10 | `POST /api/v1/query` | ejecutar RAG + dedup + reranking + generación síncrona |
+| 11 | `GET /api/v1/graph/overview` | obtener nodos/relaciones para la UI |
+| 12 | `GET /api/v1/graph/neighborhood/{entity}` | expandir vecindario de entidad |
+| 13 | `POST /api/v1/evaluations/run` | ejecutar evals y ranking comparativo |
 | - | `POST /api/v1/documents/ingest` | ruta síncrona para scripts/smoke tests |
 | - | `POST /api/v1/datasets/seed` | bootstrap manual opcional |
 | - | `GET /docs` | Swagger |
@@ -468,7 +472,7 @@ Después de levantar el stack:
 RUN_EVALUATION=true bash infrastructure/scripts/smoke-test.sh
 ```
 
-La v25 comprueba adicionalmente:
+La v27 comprueba adicionalmente:
 
 - job asíncrono con HTTP 202;
 - progreso y finalización del worker;
@@ -477,7 +481,8 @@ La v25 comprueba adicionalmente:
 - `graph/overview` para la UI;
 - ranking raw vs reranked en la evaluación;
 - MRR, nDCG y Recall@K;
-- dataset de evals ampliado.
+- dataset de evals ampliado;
+- SSE de chat a través de Nginx con eventos `stage`, `retrieval`, `delta` y `complete`.
 
 La prueba OCR conserva timeout configurable:
 

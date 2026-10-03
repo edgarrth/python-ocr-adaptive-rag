@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import shutil
 import tempfile
 from pathlib import Path
 
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile
+from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
 from pe.axiz.payment_knowledge.container import AppContainer, get_container
@@ -196,6 +198,31 @@ async def query(request: QueryRequest) -> QueryResponse:
         return await get_container().query.query(request)
     except Exception as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+def _sse(event: str, data: dict[str, object]) -> str:
+    payload = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+    return f"event: {event}\ndata: {payload}\n\n"
+
+
+@router.post("/query/stream")
+async def query_stream(request: QueryRequest) -> StreamingResponse:
+    async def events():
+        try:
+            async for event, data in get_container().query.stream(request):
+                yield _sse(event, data)
+        except Exception as exc:
+            yield _sse("error", {"detail": str(exc)})
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
 
 @router.get("/graph/neighborhood/{entity}")

@@ -59,10 +59,32 @@ interface JobResponse {
   error?: string;
 }
 
+interface ExecutionStep {
+  label: string;
+  status: 'active' | 'done' | 'error';
+  detail?: string;
+}
+
 interface ChatMessage {
+  id: string;
   role: 'user' | 'assistant';
   content: string;
   payload?: QueryResponse;
+  streaming?: boolean;
+  steps?: ExecutionStep[];
+}
+
+interface Conversation {
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  messages: ChatMessage[];
+}
+
+interface ConversationGroup {
+  label: string;
+  conversations: Conversation[];
 }
 
 interface RankingComparison {
@@ -117,6 +139,8 @@ type Workspace = 'chat' | 'documents' | 'graph' | 'evaluations';
 export class AppComponent {
   readonly Math = Math;
   private readonly apiBase = '/api/v1';
+  private readonly conversationsKey = 'axiz-adaptive-rag-conversations-v1';
+  private followStream = true;
 
   readonly strategies = [
     ['auto', 'Adaptive Routing'],
@@ -145,6 +169,8 @@ export class AppComponent {
   loading = signal(false);
   apiStatus = signal<'checking' | 'online' | 'offline'>('checking');
   messages = signal<ChatMessage[]>([]);
+  conversations = signal<Conversation[]>([]);
+  activeConversationId = signal('');
   evaluation = signal<EvaluationResponse | null>(null);
   documents = signal<DocumentSummary[]>([]);
   jobs = signal<JobResponse[]>([]);
@@ -161,16 +187,39 @@ export class AppComponent {
     if (this.workspace() === 'documents') return 'Administración de documentos';
     if (this.workspace() === 'graph') return 'Explorador de conocimiento';
     if (this.workspace() === 'evaluations') return 'Evals y ranking de estrategias';
-    return this.messages().find((message) => message.role === 'user')?.content || 'Nueva conversación';
+    return this.activeConversation()?.title || 'Nueva conversación';
   });
 
   readonly rankingRows = computed(() => this.evaluation()?.ranking_comparison || []);
   readonly categoryEntries = computed(() => Object.entries(this.evaluation()?.category_summary || {}));
 
   constructor(private readonly http: HttpClient) {
+    this.restoreConversations();
     this.checkHealth();
     this.refreshDocuments();
     this.refreshJobs();
+  }
+
+  activeConversation(): Conversation | undefined {
+    return this.conversations().find((item) => item.id === this.activeConversationId());
+  }
+
+  conversationGroups(): ConversationGroup[] {
+    const now = new Date();
+    const buckets = new Map<string, Conversation[]>();
+    const order = ['Hoy', 'Ayer', 'Últimos 7 días', 'Últimos 30 días', 'Anteriores'];
+    for (const conversation of [...this.conversations()].sort(
+      (a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt)
+    )) {
+      const label = this.conversationGroupLabel(new Date(conversation.updatedAt), now);
+      const group = buckets.get(label) || [];
+      group.push(conversation);
+      buckets.set(label, group);
+    }
+    return order.filter((label) => buckets.has(label)).map((label) => ({
+      label,
+      conversations: buckets.get(label) || []
+    }));
   }
 
   switchWorkspace(workspace: Workspace): void {
@@ -181,6 +230,7 @@ export class AppComponent {
       this.refreshJobs();
     }
     if (workspace === 'graph') this.loadGraphOverview();
+    if (workspace === 'chat') setTimeout(() => this.focusComposer(), 0);
   }
 
   checkHealth(): void {
@@ -193,46 +243,336 @@ export class AppComponent {
   useExample(example: string): void {
     this.workspace.set('chat');
     this.question = example;
+    setTimeout(() => this.focusComposer(), 0);
   }
 
   newConversation(): void {
-    this.workspace.set('chat');
+    if (this.loading()) return;
+    const conversation = this.createConversation();
+    this.conversations.update((items) => [conversation, ...items]);
+    this.activeConversationId.set(conversation.id);
     this.messages.set([]);
+    this.workspace.set('chat');
     this.question = '';
+    this.persistConversations();
+    setTimeout(() => this.focusComposer(), 0);
+  }
+
+  openConversation(id: string): void {
+    if (this.loading()) return;
+    const conversation = this.conversations().find((item) => item.id === id);
+    if (!conversation) return;
+    this.activeConversationId.set(id);
+    this.messages.set(conversation.messages.map((message) => ({ ...message, streaming: false })));
+    this.workspace.set('chat');
+    this.notice.set('');
+    this.followStream = true;
+    setTimeout(() => {
+      this.scrollToBottom(true);
+      this.focusComposer();
+    }, 0);
+  }
+
+  deleteConversation(event: Event, id: string): void {
+    event.stopPropagation();
+    if (this.loading()) return;
+    this.conversations.update((items) => items.filter((item) => item.id !== id));
+    if (this.activeConversationId() === id) {
+      const next = this.conversations()[0];
+      if (next) {
+        this.activeConversationId.set(next.id);
+        this.messages.set(next.messages);
+      } else {
+        const conversation = this.createConversation();
+        this.conversations.set([conversation]);
+        this.activeConversationId.set(conversation.id);
+        this.messages.set([]);
+      }
+    }
+    this.persistConversations();
   }
 
   onComposerKeydown(event: KeyboardEvent): void {
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault();
-      this.send();
+      void this.send();
     }
   }
 
-  send(): void {
+  onChatScroll(): void {
+    const panel = document.querySelector<HTMLElement>('.chat-panel');
+    if (!panel) return;
+    const distance = panel.scrollHeight - panel.scrollTop - panel.clientHeight;
+    this.followStream = distance < 90;
+  }
+
+  async send(): Promise<void> {
     const question = this.question.trim();
     if (!question || this.loading()) return;
-    this.messages.update((items) => [...items, { role: 'user', content: question }]);
+
+    const userMessage: ChatMessage = {
+      id: this.uuid(),
+      role: 'user',
+      content: question
+    };
+    const assistantId = this.uuid();
+    const assistantMessage: ChatMessage = {
+      id: assistantId,
+      role: 'assistant',
+      content: '',
+      streaming: true,
+      steps: [{ label: 'Conectando con el pipeline RAG', status: 'active' }]
+    };
+
+    this.messages.update((items) => [...items, userMessage, assistantMessage]);
     this.question = '';
     this.loading.set(true);
-    this.http.post<QueryResponse>(`${this.apiBase}/query`, {
-      question,
-      strategy: this.strategy,
-      top_k: this.topK,
-      include_trace: this.showTrace,
-      include_evidence: this.showEvidence,
-      rerank: this.rerank,
-      deduplicate: this.deduplicate
-    }).subscribe({
-      next: (payload) => {
-        this.messages.update((items) => [...items, { role: 'assistant', content: payload.answer, payload }]);
-        this.loading.set(false);
-      },
-      error: (error) => {
-        const detail = error?.error?.detail || 'No se pudo completar la consulta.';
-        this.messages.update((items) => [...items, { role: 'assistant', content: detail }]);
-        this.loading.set(false);
+    this.followStream = true;
+    this.updateConversationTitle(question);
+    this.persistActiveConversation();
+    requestAnimationFrame(() => this.scrollToBottom(true));
+
+    let completed = false;
+    try {
+      const response = await fetch(`${this.apiBase}/query/stream`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'text/event-stream',
+          'Cache-Control': 'no-cache'
+        },
+        body: JSON.stringify({
+          question,
+          strategy: this.strategy,
+          top_k: this.topK,
+          include_trace: this.showTrace,
+          include_evidence: this.showEvidence,
+          rerank: this.rerank,
+          deduplicate: this.deduplicate
+        })
+      });
+      if (!response.ok || !response.body) {
+        const detail = await response.text();
+        throw new Error(detail || `HTTP ${response.status}`);
       }
-    });
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n');
+        let boundary = buffer.indexOf('\n\n');
+        while (boundary >= 0) {
+          const block = buffer.slice(0, boundary);
+          buffer = buffer.slice(boundary + 2);
+          completed = this.handleSseBlock(block, assistantId) || completed;
+          boundary = buffer.indexOf('\n\n');
+        }
+      }
+      const tail = buffer.trim();
+      if (tail) completed = this.handleSseBlock(tail, assistantId) || completed;
+      if (!completed) {
+        this.finishStreamingMessage(assistantId);
+      }
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : 'No se pudo completar la consulta.';
+      this.failStreamingMessage(assistantId, detail);
+    } finally {
+      this.loading.set(false);
+      this.persistActiveConversation();
+      setTimeout(() => {
+        this.scrollToBottom();
+        this.focusComposer();
+      }, 0);
+    }
+  }
+
+  private handleSseBlock(block: string, assistantId: string): boolean {
+    if (!block.trim() || block.startsWith(':')) return false;
+    let eventName = 'message';
+    const dataLines: string[] = [];
+    for (const line of block.split('\n')) {
+      if (line.startsWith('event:')) eventName = line.slice(6).trim();
+      if (line.startsWith('data:')) dataLines.push(line.slice(5).trimStart());
+    }
+    if (!dataLines.length) return false;
+    let data: Record<string, unknown> = {};
+    try {
+      data = JSON.parse(dataLines.join('\n')) as Record<string, unknown>;
+    } catch {
+      return false;
+    }
+
+    if (eventName === 'stage') {
+      this.pushExecutionStep(assistantId, String(data['message'] || 'Procesando'));
+    } else if (eventName === 'retrieval') {
+      const contexts = Number(data['returned_contexts'] || 0);
+      const retrievalMs = Number(data['retrieval_ms'] || 0);
+      const strategy = String(data['executed_strategy'] || 'RAG');
+      this.pushExecutionStep(
+        assistantId,
+        'Evidencia recuperada y ranking aplicado',
+        `${strategy} · ${contexts} contextos · ${retrievalMs.toFixed(0)} ms`
+      );
+    } else if (eventName === 'delta') {
+      const delta = String(data['delta'] || '');
+      if (delta) this.appendAssistantDelta(assistantId, delta);
+    } else if (eventName === 'complete') {
+      const payload = data as unknown as QueryResponse;
+      this.completeStreamingMessage(assistantId, payload);
+      return true;
+    } else if (eventName === 'error') {
+      throw new Error(String(data['detail'] || data['message'] || 'Error SSE'));
+    }
+    return false;
+  }
+
+  private appendAssistantDelta(id: string, delta: string): void {
+    const shouldFollow = this.followStream;
+    this.messages.update((items) => items.map((message) =>
+      message.id === id ? { ...message, content: message.content + delta } : message
+    ));
+    if (shouldFollow) requestAnimationFrame(() => this.scrollToBottom());
+  }
+
+  private pushExecutionStep(id: string, label: string, detail?: string): void {
+    this.messages.update((items) => items.map((message) => {
+      if (message.id !== id) return message;
+      const previous = (message.steps || []).map((step) =>
+        step.status === 'active' ? { ...step, status: 'done' as const } : step
+      );
+      return {
+        ...message,
+        steps: [...previous, { label, detail, status: 'active' }]
+      };
+    }));
+    if (this.followStream) requestAnimationFrame(() => this.scrollToBottom());
+  }
+
+  private completeStreamingMessage(id: string, payload: QueryResponse): void {
+    this.messages.update((items) => items.map((message) => {
+      if (message.id !== id) return message;
+      const steps = (message.steps || []).map((step) => ({ ...step, status: 'done' as const }));
+      return {
+        ...message,
+        content: payload.answer || message.content,
+        payload,
+        streaming: false,
+        steps: [...steps, { label: 'Respuesta completada', status: 'done' as const }]
+      };
+    }));
+    this.persistActiveConversation();
+  }
+
+  private finishStreamingMessage(id: string): void {
+    this.messages.update((items) => items.map((message) => {
+      if (message.id !== id) return message;
+      const steps = (message.steps || []).map((step) => ({ ...step, status: 'done' as const }));
+      return { ...message, streaming: false, steps };
+    }));
+  }
+
+  private failStreamingMessage(id: string, detail: string): void {
+    this.messages.update((items) => items.map((message) => {
+      if (message.id !== id) return message;
+      const steps = (message.steps || []).map((step) =>
+        step.status === 'active' ? { ...step, status: 'error' as const } : step
+      );
+      return {
+        ...message,
+        content: message.content || `No se pudo completar la consulta: ${detail}`,
+        streaming: false,
+        steps
+      };
+    }));
+  }
+
+  private scrollToBottom(force = false): void {
+    if (!force && !this.followStream) return;
+    const panel = document.querySelector<HTMLElement>('.chat-panel');
+    if (!panel) return;
+    panel.scrollTop = panel.scrollHeight;
+  }
+
+  private focusComposer(): void {
+    document.querySelector<HTMLTextAreaElement>('#chat-composer-input')?.focus();
+  }
+
+  private restoreConversations(): void {
+    let restored: Conversation[] = [];
+    try {
+      const raw = localStorage.getItem(this.conversationsKey);
+      if (raw) restored = JSON.parse(raw) as Conversation[];
+    } catch {
+      restored = [];
+    }
+    restored = restored.filter((item) => item?.id && Array.isArray(item.messages));
+    if (!restored.length) restored = [this.createConversation()];
+    this.conversations.set(restored);
+    this.activeConversationId.set(restored[0].id);
+    this.messages.set(restored[0].messages.map((message) => ({ ...message, streaming: false })));
+  }
+
+  private createConversation(): Conversation {
+    const now = new Date().toISOString();
+    return {
+      id: this.uuid(),
+      title: 'Nueva conversación',
+      createdAt: now,
+      updatedAt: now,
+      messages: []
+    };
+  }
+
+  private persistActiveConversation(): void {
+    const id = this.activeConversationId();
+    const now = new Date().toISOString();
+    this.conversations.update((items) => items.map((conversation) =>
+      conversation.id === id
+        ? { ...conversation, messages: this.messages(), updatedAt: now }
+        : conversation
+    ));
+    this.persistConversations();
+  }
+
+  private persistConversations(): void {
+    try {
+      localStorage.setItem(this.conversationsKey, JSON.stringify(this.conversations()));
+    } catch {
+      // La conversación sigue operativa aunque el navegador bloquee localStorage.
+    }
+  }
+
+  private updateConversationTitle(question: string): void {
+    const id = this.activeConversationId();
+    this.conversations.update((items) => items.map((conversation) => {
+      if (conversation.id !== id || conversation.title !== 'Nueva conversación') return conversation;
+      const normalized = question.replace(/\s+/g, ' ').trim();
+      const title = normalized.length <= 46 ? normalized : `${normalized.slice(0, 45).trim()}…`;
+      return { ...conversation, title };
+    }));
+  }
+
+  private conversationGroupLabel(updated: Date, now: Date): string {
+    const oneDay = 24 * 60 * 60 * 1000;
+    const startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    const startUpdated = new Date(
+      updated.getFullYear(), updated.getMonth(), updated.getDate()
+    ).getTime();
+    const dayDiff = Math.round((startToday - startUpdated) / oneDay);
+    if (dayDiff <= 0) return 'Hoy';
+    if (dayDiff === 1) return 'Ayer';
+    if (dayDiff <= 7) return 'Últimos 7 días';
+    if (dayDiff <= 30) return 'Últimos 30 días';
+    return 'Anteriores';
+  }
+
+  private uuid(): string {
+    return typeof crypto !== 'undefined' && 'randomUUID' in crypto
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   }
 
   seed(): void {
@@ -265,7 +605,17 @@ export class AppComponent {
         this.loading.set(false);
       },
       error: (error) => {
-        this.notice.set(error?.error?.detail || 'No se pudo ejecutar la evaluación.');
+        const detail = error?.error?.detail;
+        const status = Number(error?.status || 0);
+        if (detail) {
+          this.notice.set(detail);
+        } else if (status === 504) {
+          this.notice.set('La evaluación excedió el timeout del proxy HTTP (504).');
+        } else if (status > 0) {
+          this.notice.set(`No se pudo ejecutar la evaluación (HTTP ${status}).`);
+        } else {
+          this.notice.set('No se pudo ejecutar la evaluación.');
+        }
         this.loading.set(false);
       }
     });

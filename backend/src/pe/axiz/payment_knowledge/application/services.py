@@ -7,7 +7,7 @@ import logging
 import shutil
 import time
 from pathlib import Path
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 
 from pe.axiz.payment_knowledge.config import Settings
 from pe.axiz.payment_knowledge.domain.models import (
@@ -484,6 +484,73 @@ class QueryService:
                 "total": round(total_ms, 2),
             },
         )
+
+    async def stream(self, request: QueryRequest) -> AsyncIterator[tuple[str, dict[str, object]]]:
+        """Emite actividad segura del pipeline y deltas de la respuesta mediante SSE."""
+        total_start = time.perf_counter()
+        executed, route_trace = self.resolve_strategy(request.strategy, request.question)
+        yield "stage", {
+            "stage": "routing",
+            "message": f"Routing completado · {executed}",
+            "executed_strategy": executed,
+        }
+
+        retrieval_start = time.perf_counter()
+        yield "stage", {
+            "stage": "retrieval",
+            "message": f"Recuperando evidencia con {executed}",
+        }
+        contexts, post_trace = await self.retrieve_contexts_with_trace(
+            executed,
+            request.question,
+            request.top_k,
+            rerank=request.rerank,
+            deduplicate=request.deduplicate,
+        )
+        retrieval_ms = (time.perf_counter() - retrieval_start) * 1000
+        sources = sorted({item.source for item in contexts})
+        yield "retrieval", {
+            "retrieval_ms": round(retrieval_ms, 2),
+            "executed_strategy": executed,
+            "returned_contexts": len(contexts),
+            "sources": sources,
+            "router": route_trace,
+            "ranking": post_trace,
+        }
+
+        generation_start = time.perf_counter()
+        yield "stage", {
+            "stage": "generation",
+            "message": "Generando respuesta fundamentada en la evidencia",
+        }
+        answer_parts: list[str] = []
+        async for delta in self.generator.stream(request.question, contexts):
+            answer_parts.append(delta)
+            yield "delta", {"delta": delta}
+        generation_ms = (time.perf_counter() - generation_start) * 1000
+        total_ms = (time.perf_counter() - total_start) * 1000
+        answer = "".join(answer_parts)
+        trace = {
+            "router": route_trace,
+            "requested_strategy": request.strategy,
+            "executed_strategy": executed,
+            "returned_contexts": len(contexts),
+            "sources": sources,
+            "ranking": post_trace,
+        }
+        response = QueryResponse(
+            answer=answer,
+            requested_strategy=request.strategy,
+            executed_strategy=executed,
+            contexts=contexts if request.include_evidence else [],
+            trace=trace if request.include_trace else {},
+            timings_ms={
+                "retrieval": round(retrieval_ms, 2),
+                "generation": round(generation_ms, 2),
+                "total": round(total_ms, 2),
+            },
+        )
+        yield "complete", response.model_dump(mode="json")
 
     def resolve_strategy(
         self,

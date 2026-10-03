@@ -2,7 +2,32 @@
   <aside class="rail left-rail">
     <img class="logo" src="assets/axiz-logo@2x.png" alt="Axiz">
 
-    <button class="primary wide" (click)="newConversation()">Nueva conversación</button>
+    <button class="primary wide" (click)="newConversation()" [disabled]="loading()">Nueva conversación</button>
+
+    <div class="section-title">Conversaciones</div>
+    <div class="conversation-history">
+      @for (group of conversationGroups(); track group.label) {
+        <div class="history-group-label">{{ group.label }}</div>
+        @for (conversation of group.conversations; track conversation.id) {
+          <button
+            class="conversation-item"
+            [class.active]="conversation.id === activeConversationId() && workspace() === 'chat'"
+            (click)="openConversation(conversation.id)"
+            [disabled]="loading()"
+            [title]="conversation.title"
+          >
+            <span class="conversation-title">{{ conversation.title }}</span>
+            <span
+              class="conversation-delete"
+              role="button"
+              tabindex="0"
+              title="Eliminar conversación"
+              (click)="deleteConversation($event, conversation.id)"
+            >×</span>
+          </button>
+        }
+      }
+    </div>
 
     <div class="section-title">Workspace</div>
     <button class="nav-item" [class.active]="workspace() === 'chat'" (click)="switchWorkspace('chat')">Chat / RAG Playground</button>
@@ -20,7 +45,7 @@
 
     <div class="rail-footer">
       Docling · GLM-OCR · Qdrant · Memgraph<br>
-      Native RAG · Hybrid · GraphRAG · RAGLight · LightRAG
+      Native RAG · Hybrid · GraphRAG · RAGLight · LightRAG · SSE
     </div>
   </aside>
 
@@ -34,7 +59,7 @@
         </div>
       </div>
       <div class="chips">
-        <span>Async ingestion</span><span>Semantic dedup</span><span>Reranker</span><span>Evals</span>
+        <span>SSE streaming</span><span>Async ingestion</span><span>Semantic dedup</span><span>Reranker</span><span>Evals</span>
       </div>
     </header>
 
@@ -43,83 +68,116 @@
     }
 
     @if (workspace() === 'chat') {
-      <section class="chat-panel">
+      <section class="chat-panel" (scroll)="onChatScroll()">
         @if (messages().length === 0) {
           <div class="empty-state">
-            <div class="brand-mark">AX</div>
+            <img class="hero-agent-icon" src="assets/axiz-agent-icon.png" alt="Asistente Axiz">
             <h2>RAG Playground</h2>
-            <p>Compara estrategias, inspecciona evidencia, observa el routing adaptativo y el efecto del reranking y la deduplicación.</p>
+            <p>Consulta pagos, compara estrategias, inspecciona evidencia y observa en vivo el pipeline de routing, retrieval, reranking y generación.</p>
           </div>
         }
 
-        @for (message of messages(); track $index) {
-          <article class="message" [class.user]="message.role === 'user'">
-            @if (message.role === 'assistant') {
-              <div class="avatar brand-avatar">AX</div>
-            }
-            <div class="bubble">
-              <div class="content">{{ message.content }}</div>
-              @if (message.payload) {
-                <div class="result-strip">
-                  <span>Estrategia: <strong>{{ message.payload.executed_strategy }}</strong></span>
-                  <span>Retrieval: {{ message.payload.timings_ms['retrieval'] }} ms</span>
-                  <span>Total: {{ message.payload.timings_ms['total'] }} ms</span>
-                </div>
-
-                @if (showTrace && traceEntries(message.payload).length) {
-                  <details>
-                    <summary>Trazabilidad técnica</summary>
-                    <div class="trace-grid">
-                      @for (entry of traceEntries(message.payload); track entry[0]) {
-                        <div class="trace-key">{{ entry[0] }}</div>
-                        <div class="trace-value">{{ entry[1] | json }}</div>
-                      }
-                    </div>
-                  </details>
-                }
-
-                @if (showEvidence && message.payload.contexts.length) {
-                  <details open>
-                    <summary>Evidencia recuperada</summary>
-                    <div class="evidence-list">
-                      @for (context of message.payload.contexts; track context.id) {
-                        <div class="evidence-card">
-                          <div class="evidence-head">
-                            <strong>{{ context.source }}</strong>
-                            <span>score {{ context.score | number:'1.3-4' }}</span>
+        <div class="chat-thread">
+          @for (message of messages(); track message.id) {
+            <article class="message" [class.user]="message.role === 'user'">
+              @if (message.role === 'assistant') {
+                <img class="avatar" src="assets/axiz-agent-icon.png" alt="Axiz">
+              }
+              <div class="bubble" [class.streaming]="message.streaming">
+                @if (message.role === 'assistant' && message.steps?.length) {
+                  <details class="execution-details" [open]="message.streaming">
+                    <summary>
+                      <span class="live-dot" [class.done]="!message.streaming"></span>
+                      {{ message.streaming ? 'Actividad en vivo' : 'Actividad de ejecución' }}
+                    </summary>
+                    <div class="execution-list">
+                      @for (step of message.steps || []; track $index) {
+                        <div class="execution-step" [class.active]="step.status === 'active'" [class.error]="step.status === 'error'">
+                          <span class="step-marker">{{ step.status === 'done' ? '✓' : step.status === 'error' ? '!' : '•' }}</span>
+                          <div>
+                            <strong>{{ step.label }}</strong>
+                            @if (step.detail) { <small>{{ step.detail }}</small> }
                           </div>
-                          <div class="rank-meta">
-                            @if (context.metadata['original_rank']) { <span>rank original #{{ context.metadata['original_rank'] }}</span> }
-                            @if (context.metadata['rerank_score']) { <span>rerank {{ context.metadata['rerank_score'] }}</span> }
-                            @if (context.metadata['semantic_score']) { <span>semantic {{ context.metadata['semantic_score'] }}</span> }
-                          </div>
-                          <p>{{ context.text }}</p>
-                          @if (context.entities.length) {
-                            <div class="entity-row">
-                              @for (entity of context.entities; track entity) { <span>{{ entity }}</span> }
-                            </div>
-                          }
                         </div>
                       }
                     </div>
                   </details>
                 }
-              }
-            </div>
-          </article>
-        }
 
-        @if (loading()) {
-          <div class="working"><span></span><span></span><span></span> Procesando</div>
-        }
+                @if (message.content) {
+                  <div class="content">{{ message.content }}@if (message.streaming) {<span class="stream-cursor">▌</span>}</div>
+                } @else if (message.streaming) {
+                  <div class="stream-placeholder"><span></span><span></span><span></span> Preparando respuesta…</div>
+                }
+
+                @if (message.payload) {
+                  <div class="result-strip">
+                    <span>Estrategia: <strong>{{ message.payload.executed_strategy }}</strong></span>
+                    <span>Retrieval: {{ message.payload.timings_ms['retrieval'] }} ms</span>
+                    <span>Generación: {{ message.payload.timings_ms['generation'] }} ms</span>
+                    <span>Total: {{ message.payload.timings_ms['total'] }} ms</span>
+                  </div>
+
+                  @if (showTrace && traceEntries(message.payload).length) {
+                    <details>
+                      <summary>Trazabilidad técnica</summary>
+                      <div class="trace-grid">
+                        @for (entry of traceEntries(message.payload); track entry[0]) {
+                          <div class="trace-key">{{ entry[0] }}</div>
+                          <div class="trace-value">{{ entry[1] | json }}</div>
+                        }
+                      </div>
+                    </details>
+                  }
+
+                  @if (showEvidence && message.payload.contexts.length) {
+                    <details>
+                      <summary>Evidencia recuperada</summary>
+                      <div class="evidence-list">
+                        @for (context of message.payload.contexts; track context.id) {
+                          <div class="evidence-card">
+                            <div class="evidence-head">
+                              <strong>{{ context.source }}</strong>
+                              <span>score {{ context.score | number:'1.3-4' }}</span>
+                            </div>
+                            <div class="rank-meta">
+                              @if (context.metadata['original_rank']) { <span>rank original #{{ context.metadata['original_rank'] }}</span> }
+                              @if (context.metadata['rerank_score']) { <span>rerank {{ context.metadata['rerank_score'] }}</span> }
+                              @if (context.metadata['semantic_score']) { <span>semantic {{ context.metadata['semantic_score'] }}</span> }
+                            </div>
+                            <p>{{ context.text }}</p>
+                            @if (context.entities.length) {
+                              <div class="entity-row">
+                                @for (entity of context.entities; track entity) { <span>{{ entity }}</span> }
+                              </div>
+                            }
+                          </div>
+                        }
+                      </div>
+                    </details>
+                  }
+                }
+              </div>
+            </article>
+          }
+          <div class="chat-bottom-anchor" aria-hidden="true"></div>
+        </div>
       </section>
 
-      <section class="composer">
-        <textarea [(ngModel)]="question" (keydown)="onComposerKeydown($event)" placeholder="Pregunta sobre payment processing..."></textarea>
-        <button class="send" (click)="send()" [disabled]="loading() || !question.trim()">Enviar</button>
+      <section class="composer-shell">
+        <div class="composer">
+          <textarea
+            id="chat-composer-input"
+            [(ngModel)]="question"
+            (keydown)="onComposerKeydown($event)"
+            placeholder="Pregunta sobre payment processing..."
+            rows="2"
+          ></textarea>
+          <button class="send" (click)="send()" [disabled]="loading() || !question.trim()">{{ loading() ? 'Generando…' : 'Enviar' }}</button>
+        </div>
+        <div class="composer-hint">Enter para enviar · Shift+Enter para nueva línea · el streaming SSE mantiene el chat visible</div>
       </section>
     }
-
     @if (workspace() === 'documents') {
       <section class="workspace-panel">
         <div class="workspace-head">
@@ -300,7 +358,7 @@
       <label class="toggle-row"><input type="checkbox" [(ngModel)]="showTrace"> Actividad técnica</label>
       <label class="toggle-row"><input type="checkbox" [(ngModel)]="showEvidence"> Evidencia recuperada</label>
       <div class="divider"></div>
-      <div class="tech-note"><strong>Pipeline</strong><p>retrieve candidatos → semantic dedup → rerank → top K → generación</p></div>
+      <div class="tech-note"><strong>Pipeline SSE</strong><p>routing -> retrieve candidatos -> semantic dedup -> rerank -> top K -> generación incremental. La actividad visible describe etapas técnicas, no razonamiento interno privado del modelo.</p></div>
     }
 
     @if (workspace() === 'documents') {
@@ -330,7 +388,7 @@
       <input type="range" min="1" max="10" [(ngModel)]="topK">
       <button class="nav-item" (click)="runEvaluation()" [disabled]="loading()">Volver a ejecutar</button>
       <div class="divider"></div>
-      <div class="tech-note"><strong>Qué resalta</strong><p>MRR y nDCG miden el orden del ranking; el delta raw→reranked muestra si el postprocesamiento realmente mejora la posición de la evidencia esperada.</p></div>
+      <div class="tech-note"><strong>Qué resalta</strong><p>MRR y nDCG miden el orden del ranking; el delta raw->reranked muestra si el postprocesamiento realmente mejora la posición de la evidencia esperada.</p></div>
     }
   </aside>
 </div>

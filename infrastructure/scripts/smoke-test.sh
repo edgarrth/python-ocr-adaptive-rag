@@ -78,7 +78,7 @@ curl -fsS --max-time 15 "$FRONTEND_URL/" > "$TMP_DIR/frontend.html" \
   || fail "El frontend Angular/Nginx no responde en $FRONTEND_URL"
 grep -qi "<html\|<app-root" "$TMP_DIR/frontend.html" \
   || fail "El frontend respondió pero no devolvió HTML esperado"
-ok "Frontend Angular está disponible sin esperar al dataset-seed"
+ok "Frontend Angular está disponible"
 
 if python3 - "$TMP_DIR/health.json" <<'PY'
 import json, sys
@@ -257,6 +257,24 @@ assert ranking.get("deduplicated") is True, ranking
 assert int(ranking.get("candidates", 0)) >= len(p.get("contexts", [])), ranking
 PY
 ok "Native RAG recupera idempotency.md con reranking + deduplicación"
+
+# Chat SSE por el mismo proxy Nginx usado por Angular. Debe exponer actividad y deltas
+# antes de cerrar con el payload completo.
+curl -sS -N --max-time 120 \
+  -X POST "$FRONTEND_URL/api/v1/query/stream" \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  --data-binary @"$TMP_DIR/native-request.json" > "$TMP_DIR/chat-sse.txt" \
+  || fail "El chat SSE no respondió a través de Nginx"
+grep -q '^event: stage' "$TMP_DIR/chat-sse.txt" \
+  || fail "El stream SSE no publicó eventos de actividad"
+grep -q '^event: retrieval' "$TMP_DIR/chat-sse.txt" \
+  || fail "El stream SSE no publicó el resultado de retrieval"
+grep -q '^event: delta' "$TMP_DIR/chat-sse.txt" \
+  || fail "El stream SSE no publicó deltas de texto"
+grep -q '^event: complete' "$TMP_DIR/chat-sse.txt" \
+  || fail "El stream SSE no publicó el evento complete"
+ok "Chat SSE publica actividad, retrieval, texto incremental y cierre por Nginx"
 
 # 7) Adaptive Routing: la consulta relacional debe ir a GraphRAG.
 curl -fsS --max-time 60 \
