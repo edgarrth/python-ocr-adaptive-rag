@@ -187,14 +187,14 @@ El corpus incluido cubre:
 
 Las estrategias tienen objetivos diferentes:
 
-| Estrategia | Enfoque |
-| --- | --- |
-| Native RAG | similitud semántica densa en Qdrant |
-| Hybrid RAG | dense + lexical + Reciprocal Rank Fusion |
-| GraphRAG | retrieval híbrido + expansión por relaciones en Memgraph |
-| RAGLight | motor alterno aislado sobre Qdrant |
-| LightRAG | motor graph-RAG alternativo |
-| Adaptive Routing | elige Native, Hybrid o GraphRAG según señales de la consulta |
+| Estrategia | Tipo de búsqueda | Qué significa |
+| --- | --- | --- |
+| Native RAG | Semántica vectorial | Busca en Qdrant los fragmentos cuyo significado se parece más al de la consulta, aunque no compartan las mismas palabras. |
+| Hybrid RAG | Semántica + lexical | Hace dos búsquedas: una encuentra fragmentos por significado (vectores) y otra por términos compartidos (BM25). Luego combina sus posiciones con Reciprocal Rank Fusion (RRF). Así puede recuperar tanto una explicación expresada con otras palabras como una coincidencia exacta, por ejemplo el código `05`. |
+| GraphRAG | Híbrida + relaciones | Recupera candidatos con búsqueda híbrida y amplía la evidencia siguiendo relaciones entre entidades almacenadas en Memgraph. |
+| RAGLight | Híbrida (BM25 + vectorial) | Framework alternativo que combina coincidencia de términos con similitud semántica sobre Qdrant. |
+| LightRAG | Grafo + semántica | Framework alternativo que extrae entidades y relaciones y las combina con búsqueda textual y vectorial. |
+| Adaptive Routing | Selección automática | Clasifica señales de la consulta y deriva a Native RAG, Hybrid RAG o GraphRAG; no ejecuta una búsqueda propia. |
 
 Después del retrieval, todas pasan opcionalmente por la misma deduplicación y reranking para que la comparación final sea consistente.
 
