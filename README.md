@@ -187,14 +187,14 @@ El corpus incluido cubre:
 
 Las estrategias tienen objetivos diferentes:
 
-| Estrategia | Tipo de búsqueda | Qué significa |
-| --- | --- | --- |
-| Native RAG | Semántica vectorial | Busca en Qdrant los fragmentos cuyo significado se parece más al de la consulta, aunque no compartan las mismas palabras. |
-| Hybrid RAG | Semántica + lexical | Hace dos búsquedas: una encuentra fragmentos por significado (vectores) y otra por términos compartidos (BM25). Luego combina sus posiciones con Reciprocal Rank Fusion (RRF). Así puede recuperar tanto una explicación expresada con otras palabras como una coincidencia exacta, por ejemplo el código `05`. |
-| GraphRAG | Híbrida + relaciones | Recupera candidatos con búsqueda híbrida y amplía la evidencia siguiendo relaciones entre entidades almacenadas en Memgraph. |
-| RAGLight | Híbrida (BM25 + vectorial) | Framework alternativo que combina coincidencia de términos con similitud semántica sobre Qdrant. |
-| LightRAG | Grafo + semántica | Framework alternativo que extrae entidades y relaciones y las combina con búsqueda textual y vectorial. |
-| Adaptive Routing | Selección automática | Clasifica señales de la consulta y deriva a Native RAG, Hybrid RAG o GraphRAG; no ejecuta una búsqueda propia. |
+| Estrategia | Tipo de búsqueda | Como busca | Usos                                                                                                                                                                                                     |
+| --- | --- | --- |----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Native RAG | Semántica vectorial | Busca en Qdrant los fragmentos cuyo significado se parece más al de la consulta, aunque no compartan las mismas palabras. | Preguntas conceptuales o explicativas formuladas con palabras distintas a las del documento; por ejemplo, “¿cómo funciona la tokenización?”.                                                             |
+| Hybrid RAG | Semántica + lexical | Hace dos búsquedas: una encuentra fragmentos por significado (vectores) y otra por términos compartidos (BM25). Luego combina sus posiciones con Reciprocal Rank Fusion (RRF). Así puede recuperar tanto una explicación expresada con otras palabras como una coincidencia exacta, por ejemplo el código `05`. | Consultas con códigos, identificadores, nombres de campos o términos exactos, además de preguntas que mezclan esos términos con una explicación; por ejemplo, “¿qué significa el código ISO 8583 `05`?”. |
+| GraphRAG | Híbrida + relaciones | Recupera candidatos con búsqueda híbrida y amplía la evidencia siguiendo relaciones entre entidades almacenadas en Memgraph. | Preguntas que conectan varias entidades, etapas o componentes y requieren seguir sus relaciones; por ejemplo, “¿cómo se relacionan autorización y conciliación?”.                                        |
+| RAGLight | Híbrida (BM25 + vectorial) | Framework alternativo que combina coincidencia de términos con similitud semántica sobre Qdrant. | Consultas donde importa equilibrar coincidencias textuales y semánticas; también es útil para comparar el motor híbrido del framework con el Hybrid RAG propio.                                          |
+| LightRAG | Grafo + semántica | Framework alternativo que extrae entidades y relaciones y las combina con búsqueda textual y vectorial. | Preguntas que requieren reunir información sobre entidades y sus relaciones, especialmente para comparar un framework Graph RAG con el grafo propio de Memgraph.                                         |
+| Adaptive Routing | Selección automática | Clasifica señales de la consulta y deriva a Native RAG, Hybrid RAG o GraphRAG; no ejecuta una búsqueda propia. | Cuando se quiere que la aplicación elija automáticamente: preguntas generales van a Native, consultas con códigos a Hybrid y preguntas sobre relaciones a GraphRAG.                                      |
 
 Después del retrieval, todas pasan opcionalmente por la misma deduplicación y reranking para que la comparación final sea consistente.
 
