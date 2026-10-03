@@ -1,0 +1,11 @@
+{
+  "nodes": [
+    {"id": "PAYMENT", "mentions": 4},
+    {"id": "AUTORIZACION", "mentions": 3},
+    {"id": "ADQUIRENTE", "mentions": 3}
+  ],
+  "edges": [
+    {"source": "PAYMENT", "target": "AUTORIZACION", "weight": 2},
+    {"source": "AUTORIZACION", "target": "ADQUIRENTE", "weight": 2}
+  ]
+}

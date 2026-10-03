@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     glm_ocr_max_workers: int = 1
     glm_ocr_request_timeout_seconds: int = 600
     glm_ocr_max_tokens: int = 2048
+    glm_ocr_image_max_side: int = 1400
+    glm_ocr_image_max_pixels: int = 1600000
+    glm_ocr_image_quality: int = 92
+    glm_ocr_pdf_scale: float = 1.5
     zhipu_api_key: str = ""
     ocr_policy: str = "auto"
     ocr_min_text_chars: int = 120
@@ -53,6 +57,18 @@ class Settings(BaseSettings):
     lightrag_workdir: Path = Path(".runtime/lightrag")
     lightrag_timeout_seconds: float = 300.0
     datasets_dir: Path = Path("datasets/sample_documents")
+
+    retrieval_candidate_multiplier: int = 4
+    retrieval_candidate_minimum: int = 12
+    semantic_dedup_threshold: float = 0.94
+    rerank_semantic_weight: float = 0.65
+    rerank_lexical_weight: float = 0.20
+    rerank_original_weight: float = 0.10
+    rerank_entity_weight: float = 0.05
+
+    ingestion_job_workers: int = 1
+    ingestion_job_queue_size: int = 32
+    jobs_dir: Path = Path(".runtime/jobs")
 
     def parsed_cors_origins(self) -> list[str]:
         """Acepta CORS_ORIGINS como CSV o como arreglo JSON sin depender del decoder de settings."""

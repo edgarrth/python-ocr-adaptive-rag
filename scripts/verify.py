@@ -28,6 +28,8 @@ def main() -> int:
         ]
     )
     run([sys.executable, "-m", "pytest", "-q", "backend/tests"])
+    run([sys.executable, "-m", "pytest", "-q", "raglight_service/tests"])
+    run(["bash", "-n", "infrastructure/scripts/smoke-test.sh"])
 
     npm = shutil.which("npm")
     node_modules = ROOT / "frontend" / "node_modules"

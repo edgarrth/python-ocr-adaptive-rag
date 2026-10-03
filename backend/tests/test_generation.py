@@ -1,3 +1,5 @@
+import pytest
+
 from pe.axiz.payment_knowledge.config import Settings
 from pe.axiz.payment_knowledge.domain.models import ContextItem
 from pe.axiz.payment_knowledge.generation.llm import AnswerGenerator
@@ -75,3 +77,20 @@ def test_openai_error_incluye_mensaje_del_proveedor() -> None:
         assert "Unsupported value: temperature" in str(exc)
     else:
         raise AssertionError("Debió propagar el mensaje real del proveedor")
+
+
+@pytest.mark.asyncio
+async def test_generador_extractivo_stream_entrega_deltas() -> None:
+    generator = AnswerGenerator(Settings(llm_provider="extractive"))
+    context = ContextItem(
+        id="c1",
+        document_id="d1",
+        source="authorization_codes.md",
+        title="Autorización",
+        text="El código 05 significa Do not honor.",
+        score=1.0,
+        strategy="native_rag",
+    )
+    parts = [part async for part in generator.stream("¿Qué significa 05?", [context])]
+    assert len(parts) >= 2
+    assert "authorization_codes.md" in "".join(parts)

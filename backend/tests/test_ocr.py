@@ -103,3 +103,22 @@ def test_ocr_auto_en_imagen_va_directo_a_glm(tmp_path: Path) -> None:
 
     assert parsed.processor == "glm-ocr"
     assert parsed.ocr_used is True
+
+
+def test_preprocesado_ocr_reduce_imagen_grande(tmp_path: Path) -> None:
+    import io
+    from PIL import Image
+
+    image = Image.new("RGB", (2200, 1600), "white")
+    raw = io.BytesIO()
+    image.save(raw, format="PNG")
+    adapter = GlmOcrAdapter(
+        Settings(glm_ocr_image_max_side=1000, glm_ocr_image_max_pixels=800000)
+    )
+
+    prepared, mime = adapter._prepare_image_bytes(raw.getvalue(), "image/png")
+
+    assert mime == "image/jpeg"
+    with Image.open(io.BytesIO(prepared)) as result:
+        assert max(result.size) <= 1000
+        assert result.size[0] * result.size[1] <= 800000

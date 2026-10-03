@@ -7,14 +7,17 @@ import logging
 import shutil
 import time
 from pathlib import Path
+from collections.abc import AsyncIterator, Callable
 
 from pe.axiz.payment_knowledge.config import Settings
 from pe.axiz.payment_knowledge.domain.models import (
     ContextItem,
     DocumentIndexState,
+    DocumentSummary,
     EvaluationItem,
     EvaluationRequest,
     EvaluationResponse,
+    RankingComparison,
     IngestResponse,
     OcrPolicy,
     ParsedDocument,
@@ -22,6 +25,7 @@ from pe.axiz.payment_knowledge.domain.models import (
     QueryResponse,
     RetrievalStrategy,
 )
+from pe.axiz.payment_knowledge.evaluation.metrics import ranking_metrics
 from pe.axiz.payment_knowledge.generation.llm import AnswerGenerator
 from pe.axiz.payment_knowledge.infrastructure.document_processing import DocumentProcessor, PaymentEntityExtractor, SemanticChunker, canonical_markdown_name
 from pe.axiz.payment_knowledge.infrastructure.memgraph_store import MemgraphStore
@@ -31,6 +35,7 @@ from pe.axiz.payment_knowledge.retrieval.lightrag_adapter import LightRagAdapter
 from pe.axiz.payment_knowledge.retrieval.native import HybridRagRetriever, NativeRagRetriever
 from pe.axiz.payment_knowledge.retrieval.raglight_adapter import RagLightAdapter
 from pe.axiz.payment_knowledge.retrieval.router import AdaptiveRouter
+from pe.axiz.payment_knowledge.retrieval.postprocessing import ContextPostProcessor
 
 
 logger = logging.getLogger(__name__)
@@ -67,6 +72,7 @@ class IngestionService:
         *,
         index: bool = True,
         index_external: bool = True,
+        progress_callback: Callable[[str, int], None] | None = None,
     ) -> IngestResponse:
         document_key = await asyncio.to_thread(self._content_key, path)
         lock = self._document_locks.setdefault(document_key, asyncio.Lock())
@@ -77,6 +83,7 @@ class IngestionService:
                 index_raglight=index and index_external,
                 index_lightrag=index and index_external,
                 ocr_policy=ocr_policy,
+                progress_callback=progress_callback,
             )
 
     async def _ingest_path(
@@ -87,14 +94,17 @@ class IngestionService:
         index_raglight: bool,
         index_lightrag: bool,
         ocr_policy: OcrPolicy | None = None,
+        progress_callback: Callable[[str, int], None] | None = None,
     ) -> IngestResponse:
         timings: dict[str, float] = {}
         total_started = time.perf_counter()
 
         stage_started = time.perf_counter()
+        self._progress(progress_callback, "parse_ocr", 10)
         logger.info("Ingesta %s: iniciando parse/OCR", path.name)
         document = await asyncio.to_thread(self.processor.parse, path, ocr_policy)
         timings["parse_ocr"] = round((time.perf_counter() - stage_started) * 1000, 2)
+        self._progress(progress_callback, "chunking", 35)
         logger.info(
             "Ingesta %s: parse/OCR completado con %s en %.2f ms",
             path.name,
@@ -104,6 +114,7 @@ class IngestionService:
 
         stage_started = time.perf_counter()
         chunks = self.chunker.split(document)
+        self._progress(progress_callback, "idempotency", 45)
         timings["chunking"] = round((time.perf_counter() - stage_started) * 1000, 2)
 
         raglight_indexed = False
@@ -127,15 +138,18 @@ class IngestionService:
                 path.name,
                 len(chunks),
             )
+            self._progress(progress_callback, "qdrant", 55)
             await asyncio.to_thread(self.qdrant.replace_document, chunks)
             timings["qdrant"] = round((time.perf_counter() - stage_started) * 1000, 2)
 
             stage_started = time.perf_counter()
             logger.info("Ingesta %s: reemplazando subgrafo en Memgraph", path.name)
+            self._progress(progress_callback, "memgraph", 65)
             await asyncio.to_thread(self.memgraph.replace_document, chunks)
             timings["memgraph"] = round((time.perf_counter() - stage_started) * 1000, 2)
 
             stage_started = time.perf_counter()
+            self._progress(progress_callback, "canonical", 75)
             canonical_path = self._write_canonical(document)
             timings["canonical"] = round((time.perf_counter() - stage_started) * 1000, 2)
 
@@ -144,6 +158,7 @@ class IngestionService:
                 or (index_lightrag and self.lightrag.available)
             ):
                 async with self._external_rebuild_lock:
+                    self._progress(progress_callback, "external_indexes", 80)
                     if index_raglight and self.raglight.available:
                         stage_started = time.perf_counter()
                         logger.info(
@@ -185,6 +200,7 @@ class IngestionService:
                 path.name,
             )
 
+        self._progress(progress_callback, "completed", 100)
         timings["total"] = round((time.perf_counter() - total_started) * 1000, 2)
         return IngestResponse(
             document_id=document.document_id,
@@ -297,6 +313,94 @@ class IngestionService:
         )
 
 
+    def list_documents(self) -> list[DocumentSummary]:
+        result: list[DocumentSummary] = []
+        for row in self.qdrant.list_documents():
+            document_id = str(row["document_id"])
+            state = self.index_state(document_id)
+            result.append(
+                DocumentSummary(
+                    document_id=document_id,
+                    source=str(row.get("source", "")),
+                    title=str(row.get("title", "")),
+                    processor=str(row.get("processor", "")),
+                    qdrant_chunks=int(row.get("qdrant_chunks", 0)),
+                    memgraph_chunks=state.memgraph_chunks,
+                    canonical_files=state.canonical_files,
+                    entities=list(row.get("entities") or []),
+                    consistent=state.consistent,
+                )
+            )
+        return result
+
+    async def delete_document(self, document_id: str, *, rebuild_external: bool = False) -> bool:
+        existed = self.qdrant.document_exists(document_id) or self.memgraph.document_exists(document_id)
+        await asyncio.gather(
+            asyncio.to_thread(self.qdrant.delete_document, document_id),
+            asyncio.to_thread(self.memgraph.delete_document, document_id),
+        )
+        for path in self.canonical_dir.glob(f"{document_id}__*.md"):
+            path.unlink(missing_ok=True)
+        if rebuild_external:
+            await self._rebuild_external_indexes()
+        return existed
+
+    async def reindex_document(self, document_id: str, *, rebuild_external: bool = False) -> IngestResponse:
+        canonical = sorted(self.canonical_dir.glob(f"{document_id}__*.md"))
+        if len(canonical) != 1:
+            raise FileNotFoundError(f"No existe un canónico único para {document_id}")
+        path = canonical[0]
+        source_name = path.name.split("__", 1)[-1]
+        markdown = path.read_text(encoding="utf-8")
+        document = ParsedDocument(
+            document_id=document_id,
+            source_path=path,
+            source_name=source_name,
+            title=DocumentProcessor._title(markdown, Path(source_name).stem),
+            markdown=markdown,
+            processor="canonical-reindex",
+        )
+        chunks = self.chunker.split(document)
+        await asyncio.gather(
+            asyncio.to_thread(self.qdrant.replace_document, chunks),
+            asyncio.to_thread(self.memgraph.replace_document, chunks),
+        )
+        raglight_indexed = False
+        lightrag_indexed = False
+        if rebuild_external:
+            raglight_indexed, lightrag_indexed = await self._rebuild_external_indexes()
+        return IngestResponse(
+            document_id=document_id,
+            source=source_name,
+            processor="canonical-reindex",
+            chunks=len(chunks),
+            entities=len({entity for chunk in chunks for entity in chunk.entities}),
+            ocr_used=False,
+            indexed=True,
+            raglight_indexed=raglight_indexed,
+            lightrag_indexed=lightrag_indexed,
+            idempotency_key=document_id,
+            replaced_existing=True,
+        )
+
+    async def _rebuild_external_indexes(self) -> tuple[bool, bool]:
+        raglight_indexed = False
+        lightrag_indexed = False
+        async with self._external_rebuild_lock:
+            if self.raglight.available:
+                await asyncio.to_thread(self.raglight.reset)
+                await asyncio.to_thread(self.raglight.ready)
+                raglight_indexed = await asyncio.to_thread(self.raglight.index, self.canonical_dir)
+            if self.lightrag.available:
+                await self.lightrag.reset()
+                lightrag_indexed = await self.lightrag.index()
+        return raglight_indexed, lightrag_indexed
+
+    @staticmethod
+    def _progress(callback: Callable[[str, int], None] | None, stage: str, progress: int) -> None:
+        if callback is not None:
+            callback(stage, progress)
+
     @staticmethod
     def _content_key(path: Path) -> str:
         return hashlib.sha256(path.read_bytes()).hexdigest()[:24]
@@ -328,6 +432,8 @@ class QueryService:
         lightrag: LightRagAdapter,
         router: AdaptiveRouter,
         generator: AnswerGenerator,
+        postprocessor: ContextPostProcessor,
+        settings: Settings,
     ) -> None:
         self.native = native
         self.hybrid = hybrid
@@ -336,16 +442,21 @@ class QueryService:
         self.lightrag = lightrag
         self.router = router
         self.generator = generator
+        self.postprocessor = postprocessor
+        self.settings = settings
 
     async def query(self, request: QueryRequest) -> QueryResponse:
         total_start = time.perf_counter()
-        route_trace: dict[str, object] = {}
-        executed = request.strategy
-        if request.strategy == RetrievalStrategy.AUTO:
-            executed, route_trace = self.router.route(request.question)
+        executed, route_trace = self.resolve_strategy(request.strategy, request.question)
 
         retrieval_start = time.perf_counter()
-        contexts = await self._retrieve(executed, request.question, request.top_k)
+        contexts, post_trace = await self.retrieve_contexts_with_trace(
+            executed,
+            request.question,
+            request.top_k,
+            rerank=request.rerank,
+            deduplicate=request.deduplicate,
+        )
         retrieval_ms = (time.perf_counter() - retrieval_start) * 1000
 
         generation_start = time.perf_counter()
@@ -359,6 +470,7 @@ class QueryService:
             "executed_strategy": executed,
             "returned_contexts": len(contexts),
             "sources": sorted({item.source for item in contexts}),
+            "ranking": post_trace,
         }
         return QueryResponse(
             answer=answer,
@@ -373,13 +485,150 @@ class QueryService:
             },
         )
 
-    async def retrieve_contexts(self, strategy: RetrievalStrategy, question: str, top_k: int) -> list[ContextItem]:
-        executed = strategy
-        if strategy == RetrievalStrategy.AUTO:
-            executed, _ = self.router.route(question)
-        return await self._retrieve(executed, question, top_k)
+    async def stream(self, request: QueryRequest) -> AsyncIterator[tuple[str, dict[str, object]]]:
+        """Emite actividad segura del pipeline y deltas de la respuesta mediante SSE."""
+        total_start = time.perf_counter()
+        executed, route_trace = self.resolve_strategy(request.strategy, request.question)
+        yield "stage", {
+            "stage": "routing",
+            "message": f"Routing completado · {executed}",
+            "executed_strategy": executed,
+        }
 
-    async def _retrieve(self, strategy: RetrievalStrategy, question: str, top_k: int) -> list[ContextItem]:
+        retrieval_start = time.perf_counter()
+        yield "stage", {
+            "stage": "retrieval",
+            "message": f"Recuperando evidencia con {executed}",
+        }
+        contexts, post_trace = await self.retrieve_contexts_with_trace(
+            executed,
+            request.question,
+            request.top_k,
+            rerank=request.rerank,
+            deduplicate=request.deduplicate,
+        )
+        retrieval_ms = (time.perf_counter() - retrieval_start) * 1000
+        sources = sorted({item.source for item in contexts})
+        yield "retrieval", {
+            "retrieval_ms": round(retrieval_ms, 2),
+            "executed_strategy": executed,
+            "returned_contexts": len(contexts),
+            "sources": sources,
+            "router": route_trace,
+            "ranking": post_trace,
+        }
+
+        generation_start = time.perf_counter()
+        yield "stage", {
+            "stage": "generation",
+            "message": "Generando respuesta fundamentada en la evidencia",
+        }
+        answer_parts: list[str] = []
+        async for delta in self.generator.stream(request.question, contexts):
+            answer_parts.append(delta)
+            yield "delta", {"delta": delta}
+        generation_ms = (time.perf_counter() - generation_start) * 1000
+        total_ms = (time.perf_counter() - total_start) * 1000
+        answer = "".join(answer_parts)
+        trace = {
+            "router": route_trace,
+            "requested_strategy": request.strategy,
+            "executed_strategy": executed,
+            "returned_contexts": len(contexts),
+            "sources": sources,
+            "ranking": post_trace,
+        }
+        response = QueryResponse(
+            answer=answer,
+            requested_strategy=request.strategy,
+            executed_strategy=executed,
+            contexts=contexts if request.include_evidence else [],
+            trace=trace if request.include_trace else {},
+            timings_ms={
+                "retrieval": round(retrieval_ms, 2),
+                "generation": round(generation_ms, 2),
+                "total": round(total_ms, 2),
+            },
+        )
+        yield "complete", response.model_dump(mode="json")
+
+    def resolve_strategy(
+        self,
+        strategy: RetrievalStrategy,
+        question: str,
+    ) -> tuple[RetrievalStrategy, dict[str, object]]:
+        if strategy == RetrievalStrategy.AUTO:
+            return self.router.route(question)
+        return strategy, {}
+
+    async def retrieve_contexts(
+        self,
+        strategy: RetrievalStrategy,
+        question: str,
+        top_k: int,
+        *,
+        rerank: bool = True,
+        deduplicate: bool = True,
+    ) -> list[ContextItem]:
+        contexts, _ = await self.retrieve_contexts_with_trace(
+            strategy,
+            question,
+            top_k,
+            rerank=rerank,
+            deduplicate=deduplicate,
+        )
+        return contexts
+
+    async def retrieve_contexts_with_trace(
+        self,
+        strategy: RetrievalStrategy,
+        question: str,
+        top_k: int,
+        *,
+        rerank: bool = True,
+        deduplicate: bool = True,
+    ) -> tuple[list[ContextItem], dict[str, object]]:
+        executed, route_trace = self.resolve_strategy(strategy, question)
+        candidate_k = max(
+            top_k * max(self.settings.retrieval_candidate_multiplier, 1),
+            self.settings.retrieval_candidate_minimum,
+        )
+        candidate_k = min(candidate_k, 60)
+        raw = await self._retrieve_raw(executed, question, candidate_k)
+        processed, trace = await asyncio.to_thread(
+            self.postprocessor.process,
+            question,
+            raw,
+            top_k,
+            rerank=rerank,
+            deduplicate=deduplicate,
+        )
+        return processed, {
+            "executed_strategy": executed,
+            "router": route_trace,
+            "candidate_k": candidate_k,
+            "candidates": trace.candidates,
+            "duplicates_removed": trace.duplicates_removed,
+            "reranked": trace.reranked,
+            "deduplicated": trace.deduplicated,
+        }
+
+    async def retrieve_raw(
+        self,
+        strategy: RetrievalStrategy,
+        question: str,
+        top_k: int,
+    ) -> tuple[RetrievalStrategy, list[ContextItem], dict[str, object]]:
+        executed, route_trace = self.resolve_strategy(strategy, question)
+        contexts = await self._retrieve_raw(executed, question, top_k)
+        return executed, contexts, route_trace
+
+    async def _retrieve_raw(
+        self,
+        strategy: RetrievalStrategy,
+        question: str,
+        top_k: int,
+    ) -> list[ContextItem]:
         if strategy == RetrievalStrategy.NATIVE_RAG:
             return await asyncio.to_thread(self.native.retrieve, question, top_k)
         if strategy == RetrievalStrategy.HYBRID_RAG:
@@ -394,6 +643,8 @@ class QueryService:
 
 
 class EvaluationService:
+    """Evals de ranking para comparar motores y cuantificar el efecto del reranker."""
+
     def __init__(self, query_service: QueryService, dataset_file: Path) -> None:
         self.query_service = query_service
         self.dataset_file = dataset_file
@@ -404,20 +655,55 @@ class EvaluationService:
         for case in cases:
             for strategy in request.strategies:
                 started = time.perf_counter()
-                expected = case["expected_sources"]
+                expected_sources = list(case.get("expected_sources") or [])
+                category = str(case.get("category") or "general")
+                expected_strategy = self._expected_strategy(case.get("expected_strategy"))
                 try:
-                    contexts = await self.query_service.retrieve_contexts(strategy, case["question"], request.top_k)
+                    executed, raw_contexts, _ = await self.query_service.retrieve_raw(
+                        strategy,
+                        case["question"],
+                        max(request.top_k * 4, 12),
+                    )
+                    raw_top = raw_contexts[: request.top_k]
+                    reranked, post_trace = await asyncio.to_thread(
+                        self.query_service.postprocessor.process,
+                        case["question"],
+                        raw_contexts,
+                        request.top_k,
+                        rerank=request.compare_reranking,
+                        deduplicate=True,
+                    )
+                    ranking_trace = {
+                        "duplicates_removed": post_trace.duplicates_removed,
+                        "reranked": post_trace.reranked,
+                        "deduplicated": post_trace.deduplicated,
+                    }
                     latency = (time.perf_counter() - started) * 1000
-                    sources = [item.source for item in contexts]
-                    rank = next((index for index, source in enumerate(sources, 1) if source in expected), None)
+                    raw_sources = [item.source for item in raw_top]
+                    sources = [item.source for item in reranked]
+                    raw_metrics = ranking_metrics(raw_sources, expected_sources, request.top_k)
+                    metrics = ranking_metrics(sources, expected_sources, request.top_k)
+                    routing_correct = None
+                    if strategy == RetrievalStrategy.AUTO and expected_strategy is not None:
+                        routing_correct = executed == expected_strategy
                     items.append(
                         EvaluationItem(
                             question=case["question"],
+                            category=category,
                             strategy=strategy,
-                            expected_sources=expected,
+                            expected_strategy=expected_strategy,
+                            expected_sources=expected_sources,
                             retrieved_sources=sources,
-                            hit=rank is not None,
-                            reciprocal_rank=(1.0 / rank) if rank else 0.0,
+                            raw_sources=raw_sources,
+                            hit=metrics["hit"] > 0,
+                            reciprocal_rank=metrics["mrr"],
+                            raw_reciprocal_rank=raw_metrics["mrr"],
+                            ndcg_at_k=metrics["ndcg"],
+                            raw_ndcg_at_k=raw_metrics["ndcg"],
+                            recall_at_k=metrics["recall"],
+                            precision_at_k=metrics["precision"],
+                            routing_correct=routing_correct,
+                            duplicates_removed=int(ranking_trace.get("duplicates_removed", 0)),
                             latency_ms=round(latency, 2),
                         )
                     )
@@ -426,27 +712,123 @@ class EvaluationService:
                     items.append(
                         EvaluationItem(
                             question=case["question"],
+                            category=category,
                             strategy=strategy,
-                            expected_sources=expected,
+                            expected_strategy=expected_strategy,
+                            expected_sources=expected_sources,
                             retrieved_sources=[],
+                            raw_sources=[],
                             hit=False,
                             reciprocal_rank=0.0,
+                            raw_reciprocal_rank=0.0,
+                            ndcg_at_k=0.0,
+                            raw_ndcg_at_k=0.0,
+                            recall_at_k=0.0,
+                            precision_at_k=0.0,
                             latency_ms=round(latency, 2),
                             success=False,
                             error=str(exc),
                         )
                     )
+
         summary: dict[str, dict[str, float]] = {}
+        comparisons: list[RankingComparison] = []
         for strategy in request.strategies:
             selected = [item for item in items if item.strategy == strategy]
             successful = [item for item in selected if item.success]
-            if selected:
-                divisor = len(successful) or 1
-                summary[str(strategy)] = {
-                    "hit_rate": round(sum(item.hit for item in successful) / divisor, 4),
-                    "mrr": round(sum(item.reciprocal_rank for item in successful) / divisor, 4),
-                    "avg_latency_ms": round(sum(item.latency_ms for item in successful) / divisor, 2),
-                    "successful_cases": float(len(successful)),
-                    "failed_cases": float(len(selected) - len(successful)),
+            if not selected:
+                continue
+            divisor = len(successful) or 1
+            raw_mrr = sum(item.raw_reciprocal_rank for item in successful) / divisor
+            reranked_mrr = sum(item.reciprocal_rank for item in successful) / divisor
+            raw_ndcg = sum(item.raw_ndcg_at_k for item in successful) / divisor
+            reranked_ndcg = sum(item.ndcg_at_k for item in successful) / divisor
+            hit_rate = sum(item.hit for item in successful) / divisor
+            recall = sum(item.recall_at_k for item in successful) / divisor
+            latency = sum(item.latency_ms for item in successful) / divisor
+            duplicates = sum(item.duplicates_removed for item in successful) / divisor
+            routed = [item for item in successful if item.routing_correct is not None]
+            routing_accuracy = (
+                sum(bool(item.routing_correct) for item in routed) / len(routed) if routed else None
+            )
+            summary[str(strategy)] = {
+                "hit_rate": round(hit_rate, 4),
+                "mrr": round(reranked_mrr, 4),
+                "raw_mrr": round(raw_mrr, 4),
+                "ndcg_at_k": round(reranked_ndcg, 4),
+                "raw_ndcg_at_k": round(raw_ndcg, 4),
+                "recall_at_k": round(recall, 4),
+                "avg_latency_ms": round(latency, 2),
+                "avg_duplicates_removed": round(duplicates, 2),
+                "successful_cases": float(len(successful)),
+                "failed_cases": float(len(selected) - len(successful)),
+            }
+            if routing_accuracy is not None:
+                summary[str(strategy)]["routing_accuracy"] = round(routing_accuracy, 4)
+            comparisons.append(
+                RankingComparison(
+                    strategy=strategy,
+                    raw_mrr=round(raw_mrr, 4),
+                    reranked_mrr=round(reranked_mrr, 4),
+                    delta_mrr=round(reranked_mrr - raw_mrr, 4),
+                    raw_ndcg_at_k=round(raw_ndcg, 4),
+                    reranked_ndcg_at_k=round(reranked_ndcg, 4),
+                    delta_ndcg_at_k=round(reranked_ndcg - raw_ndcg, 4),
+                    hit_rate=round(hit_rate, 4),
+                    recall_at_k=round(recall, 4),
+                    avg_latency_ms=round(latency, 2),
+                    avg_duplicates_removed=round(duplicates, 2),
+                    routing_accuracy=round(routing_accuracy, 4) if routing_accuracy is not None else None,
+                    successful_cases=len(successful),
+                    failed_cases=len(selected) - len(successful),
+                )
+            )
+
+        comparisons.sort(
+            key=lambda item: (
+                item.reranked_mrr,
+                item.reranked_ndcg_at_k,
+                item.hit_rate,
+                -item.avg_latency_ms,
+            ),
+            reverse=True,
+        )
+        category_summary = self._category_summary(items)
+        return EvaluationResponse(
+            items=items,
+            summary=summary,
+            ranking_comparison=comparisons,
+            category_summary=category_summary,
+            dataset_cases=len(cases),
+        )
+
+    @staticmethod
+    def _expected_strategy(value: object) -> RetrievalStrategy | None:
+        if not value:
+            return None
+        try:
+            return RetrievalStrategy(str(value))
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _category_summary(items: list[EvaluationItem]) -> dict[str, dict[str, dict[str, float]]]:
+        result: dict[str, dict[str, dict[str, float]]] = {}
+        categories = sorted({item.category for item in items})
+        strategies = sorted({str(item.strategy) for item in items})
+        for category in categories:
+            result[category] = {}
+            for strategy in strategies:
+                selected = [
+                    item
+                    for item in items
+                    if item.category == category and str(item.strategy) == strategy and item.success
+                ]
+                if not selected:
+                    continue
+                result[category][strategy] = {
+                    "mrr": round(sum(item.reciprocal_rank for item in selected) / len(selected), 4),
+                    "ndcg_at_k": round(sum(item.ndcg_at_k for item in selected) / len(selected), 4),
+                    "hit_rate": round(sum(item.hit for item in selected) / len(selected), 4),
                 }
-        return EvaluationResponse(items=items, summary=summary)
+        return result

@@ -1,0 +1,11 @@
+{
+  "job_id": "01-example-job",
+  "status": "running",
+  "stage": "qdrant",
+  "progress": 55,
+  "source": "documento.pdf",
+  "created_at": "2026-10-02T18:00:00+00:00",
+  "updated_at": "2026-10-02T18:00:15+00:00",
+  "result": null,
+  "error": null
+}
